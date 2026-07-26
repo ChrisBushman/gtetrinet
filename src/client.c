@@ -74,6 +74,17 @@ static int sock;
 static int connect_pending;
 static int resolved;
 
+/* True once client_finish_connecting() has sent the initial handshake
+   and the socket should be polled for a reply -- deliberately NOT the
+   same thing as `connected` (which only becomes true later, once
+   tetrinet.c processes the server's IN_PLAYERNUM reply). The original
+   GTK build's g_io_add_watch() was registered right here and fired
+   unconditionally regardless of `connected`; gating client_poll_socket()
+   on `connected` instead (as an earlier version of this port did) is a
+   deadlock -- nothing can ever read the server's reply that would set
+   `connected` true in the first place. */
+static int socket_open;
+
 /* structures and arrays for message translation */
 
 struct inmsgt {
@@ -332,6 +343,7 @@ static void client_finish_connecting (void)
 
   /* now send to server */
   client_sendmsg (s1->str);
+  socket_open = 1;
 
   g_string_free(s1, TRUE);
   g_string_free(s2, TRUE);
@@ -409,6 +421,7 @@ void client_disconnect (void)
       shutdown (sock, 2);
       close (sock);
       connected = 0;
+      socket_open = 0;
       connect_pending = 0;
 
       // Allow for sending the blocktrix init on reconnect.
@@ -419,20 +432,22 @@ void client_disconnect (void)
 
 /* some other useful functions */
 
-/* Called once per frame by the app's main loop while connected. Replaces
+/* Called once per frame by the app's main loop while the socket is open
+   (see `socket_open` above -- deliberately not `connected`). Replaces
    the old GIOChannel + g_io_add_watch(G_IO_IN, io_channel_cb) setup,
    which relied on a live GLib main loop to invoke io_channel_cb()
    whenever the socket had data ready. Here the app's own frame loop is
    the "watch": a zero-timeout select() checks readability, and if ready,
    this does exactly what io_channel_cb() used to do. Safe to call
-   unconditionally every frame -- it's a no-op while not connected. */
+   unconditionally every frame -- it's a no-op while the socket isn't
+   open. */
 void client_poll_socket (void)
 {
   fd_set readfds;
   struct timeval tv;
   gchar *buf;
 
-  if (!connected)
+  if (!socket_open)
     return;
 
   FD_ZERO (&readfds);
