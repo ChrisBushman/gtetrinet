@@ -17,17 +17,12 @@
  *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
-#ifdef HAVE_CONFIG_H
-#include <config.h>
-#endif
-
-#include <gtk/gtk.h>
-#include <gdk/gdkkeysyms.h>
-#include <glib/gi18n.h>
-#include <gobject/gtype.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdarg.h>
+#include <time.h>
+#include <glib.h>
+#include <SDL.h>
 
 #include "client.h"
 #include "tetrinet.h"
@@ -35,523 +30,615 @@
 #include "misc.h"
 
 int timestampsenable;
-gboolean list_enabled;
+int list_enabled;
 
-/* widgets that we have to do stuff with */
-static GtkWidget *playerlist, *textbox, *entrybox,
-    *namelabel, *teamlabel, *infolabel, *channel_box,
-    *textboxlabel, *channel_list;
+static int entrybox_enabled;
+static char namelabel_text[128];
+static char teamlabel_text[128];
+static char infolabel_text[256];
+static char joining_channel_text[256];
 
-static GtkListStore *work_model, *channellist_model;
+static T_textlog chatlog;
 
-/* stuff for pline history */
+#define PARTYLINE_ENTRY_MAXLEN 511
+static char entry_buf[PARTYLINE_ENTRY_MAXLEN + 1];
+static int entry_len;
+
+/* pline (chat entry) history -- pure logic, unchanged from the original
+ * other than storage: a ring buffer of past entries, browsed with
+ * Up/Down. */
 #define PLHSIZE 64
-char plhistory[PLHSIZE][256];
-int plh_start = 0, plh_end = 0, plh_cur = 0;
+static char plhistory[PLHSIZE][256];
+static int plh_start = 0, plh_end = 0, plh_cur = 0;
 
-/* function prototypes for callbacks */
-static void textentry (GtkWidget *widget);
-static gint entrykey (GtkWidget *widget, GdkEventKey *key);
-void channel_activated (GtkTreeView *treeview);
+typedef struct {
+    char number[16];
+    char name[128];
+    char team[128];
+} T_plplayer;
 
-GtkWidget *partyline_page_new (void)
+#define MAX_PL_PLAYERS 16
+static T_plplayer pl_players[MAX_PL_PLAYERS];
+static int pl_player_count;
+
+#define MAX_PL_SPECS 32
+static char pl_specs[MAX_PL_SPECS][128];
+static int pl_spec_count;
+
+typedef struct {
+    int num;
+    char name[256];
+    char players[64];
+    char state[64];
+    char desc[512];
+} T_channel;
+
+#define MAX_CHANNELS 128
+static T_channel work_channels[MAX_CHANNELS];
+static int work_channel_count;
+static T_channel display_channels[MAX_CHANNELS];
+static int display_channel_count;
+
+int partyline_page_new (void)
 {
-    GtkBuilder *builder;
-
-    work_model = gtk_list_store_new (5, G_TYPE_INT, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING);
-
-    builder = gtk_builder_new_from_resource("/apps/gtetrinet/partyline.ui");
-    // info about attributes: see gtk_tree_view_column_add_attribute
-    channellist_model = GTK_LIST_STORE (gtk_builder_get_object(builder, "channellist_model")); // model to add entries in list
-    channel_box = GTK_WIDGET (gtk_builder_get_object(builder, "channellist_treeview")); // tree view to change model, see stop_list function
-    channel_list = GTK_WIDGET (gtk_builder_get_object(builder, "channellist"));
-    g_signal_connect (G_OBJECT (channel_box), "row-activated",
-                      G_CALLBACK (channel_activated), NULL);
-    entrybox = GTK_WIDGET (gtk_builder_get_object(builder, "entrybox"));
-    g_signal_connect (G_OBJECT(entrybox), "activate",
-                      G_CALLBACK(textentry), NULL);
-    g_signal_connect (G_OBJECT(entrybox), "key-press-event",
-                      G_CALLBACK(entrykey), NULL);
-    infolabel = GTK_WIDGET (gtk_builder_get_object(builder, "infolabel"));
-    textbox = GTK_WIDGET (gtk_builder_get_object(builder, "textbox"));
-    textboxlabel = GTK_WIDGET (gtk_builder_get_object(builder, "textboxlabel"));
-    gtk_text_view_set_buffer( GTK_TEXT_VIEW (textbox), gtk_text_buffer_new(tag_table));
-    playerlist = GTK_WIDGET (gtk_builder_get_object(builder, "playerlist"));
-    namelabel = GTK_WIDGET (gtk_builder_get_object(builder, "namelabel"));
-    teamlabel = GTK_WIDGET (gtk_builder_get_object(builder, "teamlabel"));
-
-    /* set a few things */
-    partyline_connectstatus (FALSE);
+    entrybox_enabled = 0;
+    namelabel_text[0] = teamlabel_text[0] = infolabel_text[0] = joining_channel_text[0] = 0;
+    misc_textlog_clear (&chatlog);
+    entry_buf[0] = 0;
+    entry_len = 0;
     plhistory[0][0] = 0;
+    plh_start = plh_end = plh_cur = 0;
+    pl_player_count = pl_spec_count = 0;
+    work_channel_count = display_channel_count = 0;
 
-    return GTK_WIDGET (gtk_builder_get_object(builder, "partyline"));
+    partyline_connectstatus (FALSE);
+
+    return 0;
+}
+
+void partyline_page_cleanup (void)
+{
+    /* Nothing owned here needs freeing (no loaded images/fonts, unlike
+     * fields.c/winlist.c) -- kept for API symmetry with those. */
 }
 
 void partyline_connectstatus (int status)
 {
-    if (status) {
-        gtk_widget_set_sensitive (entrybox, TRUE);
-    }
-    else {
-        gtk_widget_set_sensitive (entrybox, FALSE);
-    }
+    entrybox_enabled = status ? 1 : 0;
 }
 
 void partyline_namelabel (char *nick, char *team)
 {
-    if (nick)
-    {
-      gtk_label_set_text (GTK_LABEL(namelabel), nick);
-    }
-    else gtk_label_set_text (GTK_LABEL(namelabel), "");
-    if (team)
-    {
-      gtk_label_set_text (GTK_LABEL(teamlabel), team);
-    }
-    else gtk_label_set_text (GTK_LABEL(teamlabel), "");
+    GTET_O_STRCPY (namelabel_text, nick ? nick : "");
+    GTET_O_STRCPY (teamlabel_text, team ? team : "");
 }
 
 void partyline_status (char *status)
 {
-    gtk_label_set_text (GTK_LABEL(infolabel), status);
+    GTET_O_STRCPY (infolabel_text, status);
 }
 
-void partyline_text (const gchar *text)
+void partyline_text (const char *text)
 {
     if (timestampsenable) {
         time_t now;
         char buf[1024];
         char timestamp[9];
 
-        now = time(NULL);
+        now = time (NULL);
 
-        strftime(timestamp, sizeof(timestamp), "%H:%M:%S", localtime(&now));
-        g_snprintf (buf, sizeof(buf), "%c[%s]%c %s",
+        strftime (timestamp, sizeof (timestamp), "%H:%M:%S", localtime (&now));
+        g_snprintf (buf, sizeof (buf), "%c[%s]%c %s",
                     TETRI_TB_C_GREY, timestamp, TETRI_TB_RESET, text);
 
-        textbox_addtext (GTK_TEXT_VIEW(textbox), buf);
+        misc_textlog_append (&chatlog, buf);
     }
     else
-        textbox_addtext (GTK_TEXT_VIEW(textbox), text);
-
-    adjust_bottom_text_view(GTK_TEXT_VIEW(textbox));
+        misc_textlog_append (&chatlog, text);
 }
 
 void partyline_fmt (const char *fmt, ...)
 {
-  va_list ap;
-  char *text = NULL;
+    va_list ap;
+    char *text = NULL;
 
-  va_start(ap, fmt);
-  text = g_strdup_vprintf(fmt, ap);
-  va_end(ap);
+    va_start (ap, fmt);
+    text = g_strdup_vprintf (fmt, ap);
+    va_end (ap);
 
-  partyline_text(text); g_free(text);
+    partyline_text (text);
+    g_free (text);
 }
 
 void partyline_playerlist (int *numbers, char **names, char **teams, int n, char **specs, int sn)
 {
     int i;
-    char buf0[16], buf1[128], buf2[128];
-    GtkListStore *playerlist_model = GTK_LIST_STORE (gtk_tree_view_get_model (GTK_TREE_VIEW (playerlist)));
-    GtkTreeIter iter;
 
-    /* update the playerlist so that it contains only the given names */
-    gtk_list_store_clear (playerlist_model);
-
-    for (i = 0; i < n; i ++) {
-        g_snprintf (buf0, sizeof(buf0), "%d", numbers[i]);
-        GTET_O_STRCPY (buf1, nocolor(names[i]));
-        GTET_O_STRCPY (buf2, nocolor(teams[i]));
-   
-        gtk_list_store_append (playerlist_model, &iter);
-        gtk_list_store_set (playerlist_model, &iter,
-                            0, buf0, 1, buf1, 2, buf2, -1);
+    pl_player_count = 0;
+    for (i = 0; i < n && pl_player_count < MAX_PL_PLAYERS; i++) {
+        T_plplayer *p = &pl_players[pl_player_count++];
+        g_snprintf (p->number, sizeof (p->number), "%d", numbers[i]);
+        GTET_O_STRCPY (p->name, nocolor (names[i]));
+        GTET_O_STRCPY (p->team, nocolor (teams[i]));
     }
 
-    buf0[0] = buf1[0] = buf2[0] = 0;
-    gtk_list_store_append (playerlist_model, &iter);
-    gtk_list_store_set (playerlist_model, &iter,
-                        0, buf0, 1, buf1, 2, buf2, -1);
-
-    for (i = 0; i < sn; i ++) {
-        GTET_O_STRCPY (buf0, "S");
-        GTET_O_STRCPY (buf1, nocolor(specs[i]));
-        GTET_O_STRCPY (buf2, "");
-        gtk_list_store_append (playerlist_model, &iter);
-        gtk_list_store_set (playerlist_model, &iter,
-                            0, buf0, 1, buf1, 2, buf2, -1);
-    }
+    pl_spec_count = 0;
+    for (i = 0; i < sn && pl_spec_count < MAX_PL_SPECS; i++)
+        GTET_O_STRCPY (pl_specs[pl_spec_count++], nocolor (specs[i]));
 }
 
 void partyline_entryfocus (void)
 {
-    if (connected)
-    {
-      gtk_entry_set_text (GTK_ENTRY (entrybox), "");
-      gtk_editable_set_position (GTK_EDITABLE (entrybox), 0);
-      gtk_widget_grab_focus (entrybox);
+    if (connected) {
+        entry_buf[0] = 0;
+        entry_len = 0;
     }
 }
 
-void textentry (GtkWidget *widget)
+/* --- pline history + submit, replacing GtkEntry's "activate" signal
+   handler (textentry()) and the Up/Down/Tab cases of entrykey() --- */
+
+static void
+submit_entry (void)
 {
-    const char *text;
-    text = gtk_entry_get_text (GTK_ENTRY(widget));
+    if (entry_len == 0)
+        return;
 
-    if (strlen(text) == 0) return;
+    if (g_str_has_prefix (entry_buf, "/list"))
+        stop_list (); /* Parsing can't be perfect, so make sure they can do it by hand... */
 
-    if (g_str_has_prefix(text, "/list"))
-      stop_list(); /* Parsing can't be perfect,
-                      so make sure they can do it by hand... */
-    
-    // Show the command if it's a /msg
-    if (g_str_has_prefix (text, "/msg"))
-      partyline_text (text);
-    
-    tetrinet_playerline (text);
-    GTET_O_STRCPY (plhistory[plh_end], text);
-    gtk_entry_set_text (GTK_ENTRY(widget), "");
+    /* Show the command if it's a /msg */
+    if (g_str_has_prefix (entry_buf, "/msg"))
+        partyline_text (entry_buf);
 
-    plh_end ++;
+    tetrinet_playerline (entry_buf);
+    GTET_STRCPY (plhistory[plh_end], entry_buf, sizeof (plhistory[0]));
+    entry_buf[0] = 0;
+    entry_len = 0;
+
+    plh_end++;
     if (plh_end == PLHSIZE) plh_end = 0;
-    if (plh_end == plh_start) plh_start ++;
+    if (plh_end == plh_start) plh_start++;
     if (plh_start == PLHSIZE) plh_start = 0;
     plh_cur = plh_end;
-
 }
 
-static gboolean is_nick (GtkTreeModel *model,
-                         GtkTreePath *path,
-                         GtkTreeIter *iter,
-                         gpointer data)
+static void
+history_recall (int up)
 {
-  gchar *nick, *aux, *down;
+    if (plh_cur == plh_end)
+        GTET_STRCPY (plhistory[plh_end], entry_buf, sizeof (plhistory[0]));
 
-  gtk_tree_model_get (model, iter, 1, &nick, -1);
-  down = g_utf8_strdown (nick, -1);
+    if (up) {
+        if (plh_cur == plh_start) return;
+        plh_cur--;
+        if (plh_cur == -1) plh_cur = PLHSIZE - 1;
+    } else {
+        if (plh_cur == plh_end) return;
+        plh_cur++;
+        if (plh_cur == PLHSIZE) plh_cur = 0;
+    }
 
-  if (g_str_has_prefix (down, data))
-  {
-    aux = g_strconcat (nick, ": ", NULL);
-    gtk_entry_set_text (GTK_ENTRY (entrybox), aux);
-    gtk_editable_set_position (GTK_EDITABLE (entrybox), -1);
-
-    g_free (aux);
-    g_free (nick);
-    g_free (down);
-    return TRUE;
-  }
-  else
-  {
-    g_free (nick);
-    g_free (down);
-    return FALSE;
-  }
+    GTET_STRCPY (entry_buf, plhistory[plh_cur], sizeof (entry_buf));
+    entry_len = (int) strlen (entry_buf);
 }
 
-static void playerlist_complete_nick (void)
+/* Replacing is_nick()/playerlist_complete_nick(): searches players then
+ * spectators (matching the original's single combined GtkListStore
+ * iteration order -- players first, blank separator, then specs) for
+ * the first name whose lowercased form starts with the already-typed
+ * lowercased prefix, and replaces the entry with "Name: " on a match. */
+static void
+complete_nick (void)
 {
-  GtkListStore *playerlist_model = GTK_LIST_STORE (gtk_tree_view_get_model (GTK_TREE_VIEW (playerlist)));
-  gchar *text;
+    gchar *typed;
+    int i;
 
-  text = g_utf8_strdown (gtk_entry_get_text (GTK_ENTRY (entrybox)), -1);
-  if (text == NULL) return;
+    typed = g_utf8_strdown (entry_buf, -1);
+    if (typed == NULL)
+        return;
 
-  gtk_tree_model_foreach (GTK_TREE_MODEL (playerlist_model), is_nick, text);
-
-  g_free (text);
-}
-
-static gint entrykey (GtkWidget *widget, GdkEventKey *key)
-{
-    int keyval = key->keyval;
-    gchar *text = NULL;
-
-    if (keyval == GDK_KEY_Up || keyval == GDK_KEY_Down) {
-        if (plh_cur == plh_end) {
-            GTET_O_STRCPY (plhistory[plh_end], gtk_entry_get_text(GTK_ENTRY(widget)));
+    for (i = 0; i < pl_player_count; i++) {
+        gchar *down = g_utf8_strdown (pl_players[i].name, -1);
+        int match = g_str_has_prefix (down, typed);
+        g_free (down);
+        if (match) {
+            g_snprintf (entry_buf, sizeof (entry_buf), "%s: ", pl_players[i].name);
+            entry_len = (int) strlen (entry_buf);
+            g_free (typed);
+            return;
         }
-        switch (keyval) {
-        case GDK_KEY_Up:
-            if (plh_cur == plh_start) break;
-            plh_cur --;
-            if (plh_cur == -1) plh_cur = PLHSIZE - 1;
-            break;
-        case GDK_KEY_Down:
-            if (plh_cur == plh_end) break;
-            plh_cur ++;
-            if (plh_cur == PLHSIZE) plh_cur = 0;
-            break;
+    }
+    for (i = 0; i < pl_spec_count; i++) {
+        gchar *down = g_utf8_strdown (pl_specs[i], -1);
+        int match = g_str_has_prefix (down, typed);
+        g_free (down);
+        if (match) {
+            g_snprintf (entry_buf, sizeof (entry_buf), "%s: ", pl_specs[i]);
+            entry_len = (int) strlen (entry_buf);
+            g_free (typed);
+            return;
         }
-        text = plhistory[plh_cur]; 
-        gtk_entry_set_text (GTK_ENTRY(widget), text);
-        gtk_editable_set_position (GTK_EDITABLE (widget), -1);
-#ifdef DEBUG
-        printf ("history: %d %d %d %s\n", plh_start, plh_end, plh_cur,
-                plhistory[plh_cur]);
-#endif
-        g_signal_stop_emission_by_name (G_OBJECT(widget), "key-press-event");
-        return TRUE;
     }
-    else if (keyval == GDK_KEY_Left || keyval == GDK_KEY_Right) {
-        return FALSE;
-    }
-    else if (keyval == GDK_KEY_Tab)
-    {
-      playerlist_complete_nick ();
-      return TRUE;
-    }
-    else {
-        plh_cur = plh_end;
-        return FALSE;
-    }
+    g_free (typed);
 }
 
-void partyline_add_channel (gchar *line)
+void partyline_textinput (const char *text)
 {
-  GScanner *scan;
-  gint num, actual, max;
-  gchar *name, *players, *state, final[1024], *desc, *utf8;
-  GtkTreeIter iter;
-  
-  scan = g_scanner_new (NULL);
-  g_scanner_input_text (scan, line, strlen (line));
-  
-  scan->config->cpair_comment_single = ""; // in jetrix, channels don't start with a '#' in list; use [ to start another token after channel name (tetrinet-server does not leave a space before [)
-  scan->config->skip_comment_single = FALSE;
-  scan->config->cset_skip_characters = " \n\t[";
-  scan->config->scan_identifier_1char = TRUE;
-  
-/*
-  while ((g_scanner_get_next_token (scan) != G_TOKEN_LEFT_PAREN) && !g_scanner_eof (scan));
-  g_scanner_get_next_token (scan); // dump the '('
-  num = g_ascii_strtoull(scan->value.v_string, NULL, 10); // the number is now a string entity, so we convert it ourself (v_int is badly converted)
-*/
-  while ((g_scanner_get_next_token (scan) != G_TOKEN_INT) && !g_scanner_eof (scan));
-  num = (scan->token==G_TOKEN_INT) ? scan->value.v_int : 0; 
+    size_t addlen;
 
-  g_scanner_get_next_token (scan); /* dump the ')' */
-  scan->config->cset_identifier_first = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"; // tokens can start with any character, but as identifiers take precedence, we can't detect INT anymore
-  
-  if (g_scanner_peek_next_token (scan) == G_TOKEN_LEFT_BRACE)
-  {
-    scan->config->cpair_comment_single = "# ";
-    
+    if (!entrybox_enabled || text == NULL)
+        return;
+    addlen = strlen (text);
+    if (entry_len + addlen > PARTYLINE_ENTRY_MAXLEN)
+        addlen = PARTYLINE_ENTRY_MAXLEN - entry_len;
+    if ((int) addlen <= 0)
+        return;
+    memcpy (entry_buf + entry_len, text, addlen);
+    entry_len += (int) addlen;
+    entry_buf[entry_len] = 0;
+
+    /* Typing normally resets history browsing back to "current", same
+     * as entrykey()'s final else-branch did. */
+    plh_cur = plh_end;
+}
+
+void partyline_backspace (void)
+{
+    if (!entrybox_enabled || entry_len == 0)
+        return;
+    entry_len--;
+    while (entry_len > 0 && ((unsigned char) entry_buf[entry_len] & 0xC0) == 0x80)
+        entry_len--;
+    entry_buf[entry_len] = 0;
+}
+
+void partyline_keydown (int keycode)
+{
+    if (!entrybox_enabled)
+        return;
+
+    if (keycode == SDLK_UP)
+        history_recall (1);
+    else if (keycode == SDLK_DOWN)
+        history_recall (0);
+    else if (keycode == SDLK_TAB)
+        complete_nick ();
+    else if (keycode == SDLK_RETURN || keycode == SDLK_KP_ENTER)
+        submit_entry ();
+    /* Left/Right (mid-string cursor movement) are not implemented in
+     * this pass, matching fields.c's gmsg input having the same
+     * append/backspace-only scope -- a known simplification, not a
+     * silently dropped feature. */
+}
+
+const char *partyline_entrytext (void)
+{
+    return entry_buf;
+}
+
+/* --- channel list: GScanner-based line parsing is pure protocol/text
+   logic (portable glib, no GTK) and kept close to verbatim; only the
+   storage (work_channels[]/display_channels[] arrays instead of
+   GtkListStore) changed. --- */
+
+void partyline_add_channel (char *line)
+{
+    GScanner *scan;
+    gint num, actual, max;
+    gchar *name = NULL, *players = NULL, *state = NULL, final[1024], *desc = NULL, *utf8 = NULL;
+    T_channel *chan;
+
+    if (work_channel_count >= MAX_CHANNELS)
+        return;
+
+    scan = g_scanner_new (NULL);
+    g_scanner_input_text (scan, line, strlen (line));
+
+    scan->config->cpair_comment_single = ""; /* in jetrix, channels don't start with a '#' in list; use [ to start another token after channel name (tetrinet-server does not leave a space before [) */
+    scan->config->skip_comment_single = FALSE;
+    scan->config->cset_skip_characters = " \n\t[";
+    scan->config->scan_identifier_1char = TRUE;
+
     while ((g_scanner_get_next_token (scan) != G_TOKEN_INT) && !g_scanner_eof (scan));
-    actual = (scan->token==G_TOKEN_INT) ? scan->value.v_int : 0;
-    
-    while ((g_scanner_get_next_token (scan) != G_TOKEN_INT) && !g_scanner_eof (scan));
-    max = (scan->token==G_TOKEN_INT) ? scan->value.v_int : 0;
+    num = (scan->token == G_TOKEN_INT) ? scan->value.v_int : 0;
 
-    while ((g_scanner_get_next_token (scan) != G_TOKEN_COMMENT_SINGLE) && !g_scanner_eof (scan));
-    /* This will be utf-8 since it's converted in client_readmsg, but just in
-     * case the parsing code splits up a char sequence.. - vidar
-     */
-    utf8 = ensure_utf8((scan->token==G_TOKEN_COMMENT_SINGLE) ? scan->value.v_comment : "");
-    name = g_strconcat ("#", utf8, NULL);
-    
-    g_snprintf (final, 1024, "%d/%d", actual, max);
+    g_scanner_get_next_token (scan); /* dump the ')' */
+    scan->config->cset_identifier_first = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"; /* tokens can start with any character, but as identifiers take precedence, we can't detect INT anymore */
 
-    scan->config->cpair_comment_single = "{}";
-    while ((g_scanner_get_next_token (scan) != G_TOKEN_COMMENT_SINGLE) && !g_scanner_eof (scan));
-    if (!g_scanner_eof (scan))
-      state = g_strdup ((scan->token==G_TOKEN_COMMENT_SINGLE) ? scan->value.v_comment : "");
-    else
-      state = g_strdup ("IDLE");
-
-    desc = g_strdup ("");
-    players = g_strdup ("");
-  }
-  else // tetrinet-server & jetrix
-  {
-    while ((g_scanner_get_next_token (scan) != G_TOKEN_IDENTIFIER) && !g_scanner_eof (scan)); // in jetrix, channels don't start with a '#' in list, this supports channels starting with and without '#'
-    utf8 = ensure_utf8 ((scan->token==G_TOKEN_IDENTIFIER) ? scan->value.v_identifier : "");
-    name = g_strconcat ("#", utf8, NULL);
-
-    while ((g_scanner_get_next_token (scan) != G_TOKEN_IDENTIFIER) && !g_scanner_eof (scan));
-    players = g_strdup ((scan->token==G_TOKEN_IDENTIFIER) ? scan->value.v_identifier : "");
-
-    if (players != NULL)
+    if (g_scanner_peek_next_token (scan) == G_TOKEN_LEFT_BRACE)
     {
-      if (strncmp (players, "FULL", 4))
-      {
-        scan->config->cset_identifier_first = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
-        while ((g_scanner_get_next_token (scan) != G_TOKEN_INT) && !g_scanner_eof (scan));
-        actual = (scan->token==G_TOKEN_INT) ? scan->value.v_int : 0;
+        scan->config->cpair_comment_single = "# ";
 
         while ((g_scanner_get_next_token (scan) != G_TOKEN_INT) && !g_scanner_eof (scan));
-        max = (scan->token==G_TOKEN_INT) ? scan->value.v_int : 0;
+        actual = (scan->token == G_TOKEN_INT) ? scan->value.v_int : 0;
 
-        g_snprintf (final, 1024, "%d/%d %s", actual, max, players);
-        scan->config->cset_identifier_first = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-      }
-      else
-        g_snprintf (final, 1024, "%s", players);
+        while ((g_scanner_get_next_token (scan) != G_TOKEN_INT) && !g_scanner_eof (scan));
+        max = (scan->token == G_TOKEN_INT) ? scan->value.v_int : 0;
+
+        while ((g_scanner_get_next_token (scan) != G_TOKEN_COMMENT_SINGLE) && !g_scanner_eof (scan));
+        /* This will be utf-8 since it's converted in client_readmsg, but just in
+         * case the parsing code splits up a char sequence.. - vidar
+         */
+        utf8 = ensure_utf8 ((scan->token == G_TOKEN_COMMENT_SINGLE) ? scan->value.v_comment : "");
+        name = g_strconcat ("#", utf8, NULL);
+
+        g_snprintf (final, 1024, "%d/%d", actual, max);
+
+        scan->config->cpair_comment_single = "{}";
+        while ((g_scanner_get_next_token (scan) != G_TOKEN_COMMENT_SINGLE) && !g_scanner_eof (scan));
+        if (!g_scanner_eof (scan))
+            state = g_strdup ((scan->token == G_TOKEN_COMMENT_SINGLE) ? scan->value.v_comment : "");
+        else
+            state = g_strdup ("IDLE");
+
+        desc = g_strdup ("");
+        players = g_strdup ("");
     }
-    else
-      g_snprintf (final, 1024, "UNK");
+    else /* tetrinet-server & jetrix */
+    {
+        while ((g_scanner_get_next_token (scan) != G_TOKEN_IDENTIFIER) && !g_scanner_eof (scan)); /* in jetrix, channels don't start with a '#' in list, this supports channels starting with and without '#' */
+        utf8 = ensure_utf8 ((scan->token == G_TOKEN_IDENTIFIER) ? scan->value.v_identifier : "");
+        name = g_strconcat ("#", utf8, NULL);
 
-    g_scanner_get_next_token (scan); /* dump the ']' */
+        while ((g_scanner_get_next_token (scan) != G_TOKEN_IDENTIFIER) && !g_scanner_eof (scan));
+        players = g_strdup ((scan->token == G_TOKEN_IDENTIFIER) ? scan->value.v_identifier : "");
 
-    scan->config->cpair_comment_single = "{}";
-    while ((g_scanner_get_next_token (scan) != G_TOKEN_COMMENT_SINGLE) && !g_scanner_eof (scan));
-    if (!g_scanner_eof (scan))
-      state = g_strdup ((scan->token==G_TOKEN_COMMENT_SINGLE) ? scan->value.v_comment : ""); // INGAME
-    else
-      state = g_strdup ("IDLE");
-  
-    // give us the rest of the line
-    if (!g_scanner_eof(scan) && (scan->position < strlen(line)))
-      desc = g_strstrip (ensure_utf8 (&line[scan->position]));
-    else
-      desc = g_strdup ("");
-  }
-  
-  
-  gtk_list_store_append (work_model, &iter);
-  gtk_list_store_set (work_model, &iter,
-                      0, num,
-                      1, name,
-                      2, final,
-                      3, state,
-                      4, desc,
-                      -1);
+        if (players != NULL)
+        {
+            if (strncmp (players, "FULL", 4))
+            {
+                scan->config->cset_identifier_first = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+                while ((g_scanner_get_next_token (scan) != G_TOKEN_INT) && !g_scanner_eof (scan));
+                actual = (scan->token == G_TOKEN_INT) ? scan->value.v_int : 0;
 
-  g_scanner_destroy (scan);
-  g_free (name);
-  g_free (state);
-  g_free (players);
-  g_free (desc);
-  g_free (utf8);
-}
+                while ((g_scanner_get_next_token (scan) != G_TOKEN_INT) && !g_scanner_eof (scan));
+                max = (scan->token == G_TOKEN_INT) ? scan->value.v_int : 0;
 
-gboolean copy_item (GtkTreeModel *model,
-                    GtkTreePath *path,
-                    GtkTreeIter *iter)
-{
-  gint num;
-  gchar *name, *players, *state, *desc;
-  GtkTreeIter iter2;
+                g_snprintf (final, 1024, "%d/%d %s", actual, max, players);
+                scan->config->cset_identifier_first = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+            }
+            else
+                g_snprintf (final, 1024, "%s", players);
+        }
+        else
+            g_snprintf (final, 1024, "UNK");
 
-  gtk_tree_model_get (model, iter,
-                      0, &num,
-                      1, &name,
-                      2, &players,
-                      3, &state,
-                      4, &desc, -1);
-  
-  gtk_list_store_append (channellist_model, &iter2);
-  gtk_list_store_set (channellist_model, &iter2,
-                      0, num,
-                      1, name,
-                      2, players,
-                      3, state,
-                      4, desc,
-                      -1);
-  
-  g_free (players);
-  g_free (name);
-  g_free (state);
-  g_free (desc);
-  
-  return FALSE;
+        g_scanner_get_next_token (scan); /* dump the ']' */
+
+        scan->config->cpair_comment_single = "{}";
+        while ((g_scanner_get_next_token (scan) != G_TOKEN_COMMENT_SINGLE) && !g_scanner_eof (scan));
+        if (!g_scanner_eof (scan))
+            state = g_strdup ((scan->token == G_TOKEN_COMMENT_SINGLE) ? scan->value.v_comment : ""); /* INGAME */
+        else
+            state = g_strdup ("IDLE");
+
+        /* give us the rest of the line */
+        if (!g_scanner_eof (scan) && (scan->position < strlen (line)))
+            desc = g_strstrip (ensure_utf8 (&line[scan->position]));
+        else
+            desc = g_strdup ("");
+    }
+
+    chan = &work_channels[work_channel_count++];
+    chan->num = num;
+    GTET_STRCPY (chan->name, name ? name : "", sizeof (chan->name));
+    GTET_STRCPY (chan->players, final, sizeof (chan->players));
+    GTET_STRCPY (chan->state, state ? state : "", sizeof (chan->state));
+    GTET_STRCPY (chan->desc, desc ? desc : "", sizeof (chan->desc));
+
+    g_scanner_destroy (scan);
+    g_free (name);
+    g_free (state);
+    g_free (players);
+    g_free (desc);
+    g_free (utf8);
 }
 
 void stop_list (void)
 {
-  list_issued = 0;
-  
-  /* update the channel list widget, with some sort of "double buffering" */
-  gtk_tree_view_set_model (GTK_TREE_VIEW (channel_box), GTK_TREE_MODEL (work_model));
-  gtk_list_store_clear (channellist_model);
-  gtk_tree_model_foreach (GTK_TREE_MODEL (work_model), (GtkTreeModelForeachFunc) copy_item, NULL);
-  gtk_tree_view_set_model (GTK_TREE_VIEW (channel_box), GTK_TREE_MODEL (channellist_model));
+    int i;
+
+    list_issued = 0;
+
+    /* "double buffering": copy the staging list built up by
+     * partyline_add_channel() into the displayed list in one shot,
+     * rather than the displayed list flickering/partially updating
+     * while a multi-line /list response streams in. work_channels[]
+     * itself is deliberately NOT cleared here, matching the original
+     * (only partyline_update_channel_list()/partyline_clear_list_channel()
+     * clear the staging model). */
+    display_channel_count = 0;
+    for (i = 0; i < work_channel_count && display_channel_count < MAX_CHANNELS; i++)
+        display_channels[display_channel_count++] = work_channels[i];
 }
 
-gboolean partyline_update_channel_list (void)
+int partyline_update_channel_list (void)
 {
-  gchar cad[1024];
-  
-  /* if there is another update in progress, just go away silently */
-  if (connected && list_enabled && (list_issued == 0))
-  {
-    list_issued++;
-    gtk_list_store_clear (work_model);
-    tetrinet_playerline ("/list");
-  
-    /* send the mark */
-    g_snprintf (cad, 1024, "/msg %d --- MARK ---", playernum);
-    tetrinet_playerline (cad);
-  }
-  
-  return TRUE;
+    char buf[1024];
+
+    /* if there is another update in progress, just go away silently */
+    if (connected && list_enabled && (list_issued == 0)) {
+        list_issued++;
+        work_channel_count = 0;
+        tetrinet_playerline ("/list");
+
+        /* send the mark */
+        g_snprintf (buf, sizeof (buf), "/msg %d --- MARK ---", playernum);
+        tetrinet_playerline (buf);
+    }
+
+    return TRUE; /* keep the 30-second sched_timeout_add repeating (see
+                    tetrinet.c) */
 }
 
 void partyline_more_channel_lines (void)
 {
-  gchar cad[1024];
+    char buf[1024];
 
-  list_issued ++;
-  tetrinet_playerline ("/list+");
-  g_snprintf (cad, 1024, "/msg %d --- MARK ---", playernum);
-  tetrinet_playerline (cad);
+    list_issued++;
+    tetrinet_playerline ("/list+");
+    g_snprintf (buf, sizeof (buf), "/msg %d --- MARK ---", playernum);
+    tetrinet_playerline (buf);
 }
 
 void partyline_clear_list_channel (void)
 {
-  gtk_list_store_clear (channellist_model);
-  gtk_list_store_clear (work_model);
+    display_channel_count = 0;
+    work_channel_count = 0;
 }
 
-void channel_activated (GtkTreeView *treeview)
+/* Replaces channel_activated(), which fired on a GtkTreeView row
+ * double-click/Enter. The main loop (not yet written) calls this with
+ * the clicked row's index into the currently-displayed channel list once
+ * it has mouse-hit-testing against partyline_render()'s layout. */
+void partyline_channel_activate (int index)
 {
-  GtkTreeSelection *selection = gtk_tree_view_get_selection (treeview);
-  GtkTreeIter iter;
-  gchar *name, *cad;
-  
-  gtk_tree_selection_get_selected (selection, NULL, &iter);
-  gtk_tree_model_get (GTK_TREE_MODEL (channellist_model),
-                      &iter,
-                      1, &name, -1);
-  
-  cad = g_strconcat ("/join ", name, NULL);
-  tetrinet_playerline (cad);
-  
-  g_free (name);
-  g_free (cad);
+    char buf[300];
+
+    if (index < 0 || index >= display_channel_count)
+        return;
+    g_snprintf (buf, sizeof (buf), "/join %s", display_channels[index].name);
+    tetrinet_playerline (buf);
 }
 
-void partyline_joining_channel (const gchar *channel)
+void partyline_joining_channel (const char *channel)
 {
-  gchar *final;
-  
-  if (channel != NULL)
-    final = g_strconcat ("<b>", _("Talking in channel"), " ", channel, "</b>", NULL);
-  else
-    final = g_strconcat ("<b>", _("Disconnected"), "</b>", NULL);
-
-  gtk_label_set_markup (GTK_LABEL (textboxlabel), final);
-  
-  g_free (final);
+    if (channel != NULL)
+        g_snprintf (joining_channel_text, sizeof (joining_channel_text), "Talking in channel %s", channel);
+    else
+        GTET_O_STRCPY (joining_channel_text, "Disconnected");
 }
 
-void partyline_show_channel_list (gboolean show)
+void partyline_show_channel_list (int show)
 {
-  /*
-   * If this function is called with TRUE, it will show the channel list, otherwise
-   * it'll hide it.
-   * If there is no channel_list yet, do nothing
-   */
-  if(channel_list)
-  {
     list_enabled = show;
     if (list_enabled)
-    {
-      gtk_widget_show (channel_list);
-      partyline_update_channel_list ();
+        partyline_update_channel_list ();
+}
+
+/* --- rendering --- */
+
+static void
+render_label (SDL_Surface *dst, int x, int y, const char *text)
+{
+    T_textstyle style;
+
+    style.color.r = style.color.g = style.color.b = 0xFF; style.color.a = 0xFF;
+    style.bold = style.italic = style.underline = 0;
+    misc_font_render (dst, x, y, &style, text, strlen (text));
+}
+
+static void
+render_label_bold (SDL_Surface *dst, int x, int y, const char *text)
+{
+    T_textstyle style;
+
+    style.color.r = style.color.g = style.color.b = 0xFF; style.color.a = 0xFF;
+    style.bold = 1; style.italic = style.underline = 0;
+    misc_font_render (dst, x, y, &style, text, strlen (text));
+}
+
+static void
+render_player_list (SDL_Surface *dst, const SDL_Rect *rect)
+{
+    int line_h = misc_font_line_height ();
+    int y = rect->y;
+    int i;
+    char buf[300];
+
+    for (i = 0; i < pl_player_count && y + line_h <= rect->y + rect->h; i++) {
+        if (pl_players[i].team[0])
+            g_snprintf (buf, sizeof (buf), "%s: %s (%s)", pl_players[i].number, pl_players[i].name, pl_players[i].team);
+        else
+            g_snprintf (buf, sizeof (buf), "%s: %s", pl_players[i].number, pl_players[i].name);
+        render_label (dst, rect->x, y, buf);
+        y += line_h;
     }
-    else
-      gtk_widget_hide (channel_list);
-  }
+    y += line_h / 2;
+    for (i = 0; i < pl_spec_count && y + line_h <= rect->y + rect->h; i++) {
+        g_snprintf (buf, sizeof (buf), "(spec) %s", pl_specs[i]);
+        render_label (dst, rect->x, y, buf);
+        y += line_h;
+    }
+}
+
+static void
+render_channel_list (SDL_Surface *dst, const SDL_Rect *rect)
+{
+    int line_h = misc_font_line_height ();
+    int y = rect->y;
+    int i;
+    char buf[900];
+
+    for (i = 0; i < display_channel_count && y + line_h <= rect->y + rect->h; i++) {
+        g_snprintf (buf, sizeof (buf), "%s [%s] %s %s",
+                    display_channels[i].name, display_channels[i].players,
+                    display_channels[i].state, display_channels[i].desc);
+        render_label (dst, rect->x, y, buf);
+        y += line_h;
+    }
+}
+
+/* Lays out, inside rect: name/team/info/joining-channel labels along
+ * the top; chat log + entry box in a left column; player list (and,
+ * if enabled, the channel list below it) in a right column. Recomputed
+ * every call rather than cached like fields.c's BLOCKSIZE-dependent
+ * layout -- these proportions don't depend on anything that changes at
+ * runtime, so there's nothing to invalidate/recompute-on-change for. */
+void partyline_render (SDL_Surface *dst, const SDL_Rect *rect)
+{
+    int line_h = misc_font_line_height ();
+    int label_h = line_h * 2 + 4;
+    int right_w = rect->w * 3 / 10;
+    int left_w = rect->w - right_w - 8;
+    SDL_Rect chat_rect, input_rect, player_rect, channel_rect;
+    char buf[300];
+
+    render_label_bold (dst, rect->x, rect->y, namelabel_text);
+    if (teamlabel_text[0]) {
+        char teambuf[160];
+        g_snprintf (teambuf, sizeof (teambuf), "(%s)", teamlabel_text);
+        render_label (dst, rect->x + 200, rect->y, teambuf);
+    }
+    render_label (dst, rect->x, rect->y + line_h, infolabel_text);
+    /* Second row, not the first: the name/team labels above have no
+     * fixed width available without a text-measuring API (misc.h only
+     * exposes render + line-height), so sharing a row with them risks
+     * overlap the same way fields.c's field labels can (documented
+     * there too). The second row only has the short info label on the
+     * left, leaving room on the right. */
+    if (joining_channel_text[0])
+        render_label_bold (dst, rect->x + left_w - 220, rect->y + line_h, joining_channel_text);
+
+    chat_rect.x = rect->x;
+    chat_rect.y = rect->y + label_h;
+    chat_rect.w = left_w;
+    chat_rect.h = rect->h - label_h - line_h - 8;
+    misc_textlog_render (dst, &chat_rect, &chatlog);
+
+    input_rect.x = rect->x;
+    input_rect.y = chat_rect.y + chat_rect.h + 4;
+    input_rect.w = left_w;
+    input_rect.h = line_h + 4;
+    SDL_FillRect (dst, &input_rect, SDL_MapRGB (dst->format, 32, 32, 32));
+    if (entrybox_enabled) {
+        g_snprintf (buf, sizeof (buf), "%s", entry_buf);
+        render_label (dst, input_rect.x + 2, input_rect.y + 2, buf);
+    }
+
+    player_rect.x = rect->x + left_w + 8;
+    player_rect.y = rect->y + label_h;
+    player_rect.w = right_w;
+    if (list_enabled) {
+        player_rect.h = (rect->h - label_h) / 2;
+        channel_rect.x = player_rect.x;
+        channel_rect.y = player_rect.y + player_rect.h + 4;
+        channel_rect.w = right_w;
+        channel_rect.h = rect->h - label_h - player_rect.h - 4;
+        render_channel_list (dst, &channel_rect);
+    } else {
+        player_rect.h = rect->h - label_h;
+    }
+    render_player_list (dst, &player_rect);
 }
