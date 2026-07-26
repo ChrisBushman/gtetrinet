@@ -17,60 +17,72 @@
  *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
-#ifdef HAVE_CONFIG_H
-#include <config.h>
-#endif
-
-#include <gtk/gtk.h>
-#include <sys/types.h>
-#include <sys/wait.h>
-#include <signal.h>
 #include <stdlib.h>
-#include "sound.h"
+#include <stdio.h>
+#include <SDL_mixer.h>
 
-extern char **environ;
+#include "sound.h"
 
 int soundenable;
 
 char soundfiles[S_NUM][1024];
 
-#ifdef HAVE_CANBERRAGTK
+static int mixer_ready = 0;
+static Mix_Chunk *samples[S_NUM] = {NULL};
 
-#include <canberra-gtk.h>
+int sound_init (void)
+{
+    if (Mix_OpenAudio (44100, MIX_DEFAULT_FORMAT, 2, 1024) != 0) {
+        fprintf (stderr, "sound_init: Mix_OpenAudio failed: %s (sound disabled)\n", Mix_GetError ());
+        mixer_ready = 0;
+        return -1;
+    }
+    mixer_ready = 1;
+    return 0;
+}
 
-static char *soundsamples[S_NUM] = {NULL};
+void sound_cleanup (void)
+{
+    int i;
+
+    for (i = 0; i < S_NUM; i++) {
+        if (samples[i] != NULL) {
+            Mix_FreeChunk (samples[i]);
+            samples[i] = NULL;
+        }
+    }
+    if (mixer_ready) {
+        Mix_CloseAudio ();
+        mixer_ready = 0;
+    }
+}
 
 void sound_cache (void)
 {
     int i;
-    if (!soundenable) return;
-    for (i = 0; i < S_NUM; i ++) {
-        if (soundsamples[i] != NULL)
-            g_free (soundsamples[i]);
-        if (soundfiles[i][0]) {
-            ca_context_cache (ca_gtk_context_get (), CA_PROP_MEDIA_FILENAME, soundfiles[i], NULL);
-            soundsamples[i] = g_strdup (soundfiles[i]);
-        } else {
-            soundsamples[i] = NULL;
+
+    if (!soundenable || !mixer_ready)
+        return;
+
+    for (i = 0; i < S_NUM; i++) {
+        if (samples[i] != NULL) {
+            Mix_FreeChunk (samples[i]);
+            samples[i] = NULL;
         }
+        if (soundfiles[i][0])
+            samples[i] = Mix_LoadWAV (soundfiles[i]);
+        /* A theme that doesn't ship this particular sound (soundfiles[i]
+         * left empty by config_loadtheme) or a file SDL_mixer can't
+         * decode both just leave samples[i] NULL -- sound_playsound()
+         * below already treats that as "nothing to play", matching the
+         * original's silent handling of an unset sound slot. */
     }
 }
 
 void sound_playsound (int id)
 {
-    if (!soundenable) return;
-    if (soundsamples[id] != NULL)
-      ca_context_play (ca_gtk_context_get (), 0,
-                         CA_PROP_MEDIA_FILENAME, soundsamples[id],
-                         /* If GTK says sounds are disabled, override it. */
-                         CA_PROP_CANBERRA_ENABLE, "1",
-                         NULL);
+    if (!soundenable || !mixer_ready)
+        return;
+    if (samples[id] != NULL)
+        Mix_PlayChannel (-1, samples[id], 0);
 }
-
-#else
-
-/* stubs */
-void sound_cache (void) {}
-void sound_playsound (int id) {id = id;}
-
-#endif

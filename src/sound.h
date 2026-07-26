@@ -15,6 +15,15 @@ extern int soundenable;
 
 extern char soundfiles[S_NUM][1024];
 
+/* Call once at startup, after SDL_Init(SDL_INIT_AUDIO) -- opens the
+ * audio device via SDL_mixer. Returns 0 on success. If this fails (no
+ * audio hardware, e.g. some IRIX/O2 configurations), sound_cache()/
+ * sound_playsound() remain safe, silent no-ops rather than crashing --
+ * matches how the original HAVE_CANBERRAGTK-less build already had a
+ * silent no-op fallback for "no sound support compiled in" at all. */
+int sound_init (void);
+void sound_cleanup (void);
+
 void sound_cache (void);
 void sound_playsound (int id);
 

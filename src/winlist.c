@@ -17,77 +17,109 @@
  *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
-#ifdef HAVE_CONFIG_H
-#include <config.h>
-#endif
-
-#include <gtk/gtk.h>
-#include <glib/gi18n.h>
 #include <string.h>
 #include <stdio.h>
+#include <SDL_image.h>
 
 #include "client.h"
 #include "tetrinet.h"
 #include "winlist.h"
 #include "misc.h"
 
-static GtkWidget *winlist;
-static GdkPixbuf *team_icon, *alone_icon;
+#define WINLIST_MAX_ITEMS 64
+#define ICON_SIZE 48 /* native size of icons/team.png, icons/alone.png --
+                         rendered as-is rather than runtime-scaled to 24x24
+                         like the GTK build did, to avoid needing an image
+                         scaling routine of our own; a cosmetic difference
+                         only. */
 
-GtkWidget *winlist_page_new (void)
+typedef struct {
+    int team;
+    char name[128];
+    int score;
+} T_winitem;
+
+static SDL_Surface *team_icon, *alone_icon;
+static T_winitem items[WINLIST_MAX_ITEMS];
+static int item_count;
+
+int winlist_page_new (void)
 {
-    GtkWidget *align, *scroll;
-    GtkCellRenderer *renderer = gtk_cell_renderer_text_new ();
-    GtkCellRenderer *pixbuf_renderer = gtk_cell_renderer_pixbuf_new ();
-    GtkListStore *winlist_store = gtk_list_store_new (3, GDK_TYPE_PIXBUF, G_TYPE_STRING, G_TYPE_STRING);
-    GdkPixbuf *pixbuf;
-    GtkBuilder *builder;
+    team_icon = IMG_Load (GTETPIXMAPSDIR "/team.png");
+    alone_icon = IMG_Load (GTETPIXMAPSDIR "/alone.png");
+    if (team_icon == NULL || alone_icon == NULL) {
+        fprintf (stderr, "winlist_page_new: failed to load team/alone icons: %s\n", SDL_GetError ());
+        return -1;
+    }
+    item_count = 0;
+    return 0;
+}
 
-    /* Load the icons and scale them */
-    pixbuf = gdk_pixbuf_new_from_file (GTETPIXMAPSDIR "/team.png",  NULL);
-    team_icon = gdk_pixbuf_scale_simple (pixbuf, 24, 24, GDK_INTERP_BILINEAR);
-    g_object_unref (pixbuf);
-    
-    pixbuf = gdk_pixbuf_new_from_file (GTETPIXMAPSDIR "/alone.png", NULL);
-    alone_icon = gdk_pixbuf_scale_simple (pixbuf, 24, 24, GDK_INTERP_BILINEAR);
-    g_object_unref (pixbuf);
-
-    builder = gtk_builder_new_from_resource("/apps/gtetrinet/winlist.ui");
-    winlist = GTK_WIDGET (gtk_builder_get_object(builder, "winlist"));
-    winlist_store = GTK_LIST_STORE (gtk_builder_get_object(builder, "winlist_model"));
-
-    return GTK_WIDGET (gtk_builder_get_object(builder, "winlist_parent"));
+void winlist_page_cleanup (void)
+{
+    if (team_icon) { SDL_FreeSurface (team_icon); team_icon = NULL; }
+    if (alone_icon) { SDL_FreeSurface (alone_icon); alone_icon = NULL; }
 }
 
 void winlist_clear (void)
 {
-    GtkListStore *winlist_model = GTK_LIST_STORE (gtk_tree_view_get_model (GTK_TREE_VIEW (winlist)));
-  
-    gtk_list_store_clear (winlist_model);
+    item_count = 0;
 }
 
 void winlist_additem (int team, char *name, int score)
 {
-    GtkListStore *winlist_model = GTK_LIST_STORE (gtk_tree_view_get_model (GTK_TREE_VIEW (winlist)));
-    GtkTreeIter iter;
-    char buf[16], *item[2];
-    GdkPixbuf *pixbuf;
+    T_winitem *it;
 
-    if (team) pixbuf = team_icon;
-    else pixbuf = alone_icon;
-    item[0] = nocolor (name);
-    g_snprintf (buf, sizeof(buf), "%d", score);
-    item[1] = buf;
-
-    gtk_list_store_append (winlist_model, &iter);
-    gtk_list_store_set (winlist_model, &iter,
-                        0, pixbuf,
-                        1, item[0],
-                        2, item[1],
-                        -1);
+    if (item_count >= WINLIST_MAX_ITEMS)
+        return; /* matches the original having no explicit cap either,
+                    but an SDL fixed-size array needs one; a game only
+                    ever has up to 6 players, so this is generous
+                    headroom, not a real limit in practice. */
+    it = &items[item_count++];
+    it->team = team;
+    GTET_STRCPY (it->name, nocolor (name), sizeof (it->name));
+    it->score = score;
 }
 
 void winlist_focus (void)
 {
-  gtk_widget_grab_focus (winlist);
+    /* No keyboard-focus concept to hand off to in the SDL port -- the
+     * main loop reads input directly rather than routing it through a
+     * focused widget. Kept as a no-op so callers (tetrinet.c) don't need
+     * a special case. */
+}
+
+void winlist_render (SDL_Surface *dst, const SDL_Rect *rect)
+{
+    T_textstyle style;
+    int i;
+    int row_h = ICON_SIZE + 4;
+    int y = rect->y;
+    char scorebuf[32];
+
+    style.color.r = style.color.g = style.color.b = 0xFF; style.color.a = 0xFF;
+    style.bold = style.italic = style.underline = 0;
+
+    for (i = 0; i < item_count && y + row_h <= rect->y + rect->h; i++) {
+        SDL_Surface *icon = items[i].team ? team_icon : alone_icon;
+        SDL_Rect dstrect;
+        int textx = rect->x;
+
+        if (icon) {
+            dstrect.x = rect->x;
+            dstrect.y = y;
+            dstrect.w = icon->w;
+            dstrect.h = icon->h;
+            SDL_BlitSurface (icon, NULL, dst, &dstrect);
+            textx = rect->x + ICON_SIZE + 8;
+        }
+
+        textx += misc_font_render (dst, textx, y + row_h / 2 - misc_font_line_height () / 2,
+                                    &style, items[i].name, strlen (items[i].name));
+        g_snprintf (scorebuf, sizeof (scorebuf), "  %d", items[i].score);
+        misc_font_render (dst, textx, y + row_h / 2 - misc_font_line_height () / 2,
+                           &style, scorebuf, strlen (scorebuf));
+
+        y += row_h;
+    }
 }
