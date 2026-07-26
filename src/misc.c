@@ -264,3 +264,76 @@ int misc_font_render (SDL_Surface *dst, int x, int y, const T_textstyle *style, 
 
     return width;
 }
+
+/* --- scrolling formatted-text log (see misc.h for why this is shared) --- */
+
+struct textlog_append_ctx {
+    T_logline *line;
+};
+
+static void
+textlog_append_run_cb (const T_textstyle *style, const char *text, size_t len, void *userdata)
+{
+    struct textlog_append_ctx *ctx = userdata;
+    T_logrun *run;
+
+    if (ctx->line->runcount >= MISC_TEXTLOG_RUNS_PER_LINE)
+        return;
+    run = &ctx->line->runs[ctx->line->runcount++];
+    run->style = *style;
+    if (len >= sizeof (run->text))
+        len = sizeof (run->text) - 1;
+    memcpy (run->text, text, len);
+    run->text[len] = 0;
+}
+
+void misc_textlog_append (T_textlog *log, const char *str)
+{
+    T_logline *line;
+    struct textlog_append_ctx ctx;
+
+    line = &log->lines[log->next];
+    line->runcount = 0;
+    ctx.line = line;
+    misc_parse_formatted (str, textlog_append_run_cb, &ctx);
+
+    log->next = (log->next + 1) % MISC_TEXTLOG_MAXLINES;
+    if (log->count < MISC_TEXTLOG_MAXLINES)
+        log->count++;
+}
+
+void misc_textlog_clear (T_textlog *log)
+{
+    log->count = 0;
+    log->next = 0;
+}
+
+void misc_textlog_render (SDL_Surface *dst, const SDL_Rect *rect, const T_textlog *log)
+{
+    int line_h = misc_font_line_height ();
+    int visible = rect->h / (line_h ? line_h : 1);
+    int i, y;
+    int first; /* ring-buffer index of the first line to draw */
+
+    if (visible > log->count)
+        visible = log->count;
+    if (visible <= 0)
+        return;
+
+    /* Most recent line is at (log->next - 1); walk back `visible` lines
+     * from there to find where to start, then draw forward top-to-bottom
+     * so the newest line ends up at the bottom -- a chat window, not a
+     * top-down log. */
+    first = (log->next - visible + MISC_TEXTLOG_MAXLINES) % MISC_TEXTLOG_MAXLINES;
+
+    y = rect->y + rect->h - visible * line_h;
+    for (i = 0; i < visible; i++) {
+        const T_logline *line = &log->lines[(first + i) % MISC_TEXTLOG_MAXLINES];
+        int x = rect->x;
+        int r;
+        for (r = 0; r < line->runcount; r++)
+            x += misc_font_render (dst, x, y, &line->runs[r].style,
+                                    line->runs[r].text, strlen (line->runs[r].text));
+        y += line_h;
+    }
+}

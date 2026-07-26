@@ -37,10 +37,7 @@
 #define NUM_OPPONENT_FIELDS 5
 #define SPECIALS_SLOTS 18
 #define GMSG_INPUT_MAXLEN 511
-#define LOG_MAXLINES 256
 #define LOG_VISIBLE_LINES 6
-#define RUNS_PER_LINE 16
-#define RUN_TEXT_MAX 256
 
 static SDL_Surface *blockpix;
 
@@ -59,22 +56,9 @@ static char leveltext[16] = "";
 static int activelevel_visible = 0;
 static char activeleveltext[16] = "";
 
-typedef struct {
-    T_textstyle style;
-    char text[RUN_TEXT_MAX];
-} T_run;
-
-typedef struct {
-    T_run runs[RUNS_PER_LINE];
-    int runcount;
-} T_logline;
-
-typedef struct {
-    T_logline lines[LOG_MAXLINES];
-    int count;  /* number of valid lines, capped at LOG_MAXLINES */
-    int next;   /* ring-buffer write position */
-} T_textlog;
-
+/* T_textlog (attdeflog/gmsglog's type) is misc.h's shared scrolling
+ * formatted-text-log component -- see misc.h for why this was pulled
+ * out of fields.c once partyline.c needed the exact same thing. */
 static T_textlog attdeflog;
 static T_textlog gmsglog;
 
@@ -99,10 +83,7 @@ static void render_field (SDL_Surface *dst, int field, const SDL_Rect *rect);
 static void render_nextblock (SDL_Surface *dst);
 static void render_specials (SDL_Surface *dst);
 static void render_labels (SDL_Surface *dst);
-static void render_textlog (SDL_Surface *dst, const SDL_Rect *rect, const T_textlog *log);
 static void render_gmsginput (SDL_Surface *dst);
-static void textlog_append (T_textlog *log, const char *str);
-static void textlog_clear (T_textlog *log);
 
 static void
 blit_tile (SDL_Surface *dst, int srcx, int srcy, int destx, int desty, int w, int h)
@@ -360,85 +341,9 @@ render_nextblock (SDL_Surface *dst)
                            BLOCKSIZE, BLOCKSIZE);
 }
 
-/* --- text logs (attack/defense messages, in-game chat) --- */
-
-struct append_ctx {
-    T_logline *line;
-};
-
-static void
-append_run_cb (const T_textstyle *style, const char *text, size_t len, void *userdata)
-{
-    struct append_ctx *ctx = userdata;
-    T_run *run;
-
-    if (ctx->line->runcount >= RUNS_PER_LINE)
-        return;
-    run = &ctx->line->runs[ctx->line->runcount++];
-    run->style = *style;
-    if (len >= sizeof (run->text))
-        len = sizeof (run->text) - 1;
-    memcpy (run->text, text, len);
-    run->text[len] = 0;
-}
-
-static void
-textlog_append (T_textlog *log, const char *str)
-{
-    T_logline *line;
-    struct append_ctx ctx;
-
-    line = &log->lines[log->next];
-    line->runcount = 0;
-    ctx.line = line;
-    misc_parse_formatted (str, append_run_cb, &ctx);
-
-    log->next = (log->next + 1) % LOG_MAXLINES;
-    if (log->count < LOG_MAXLINES)
-        log->count++;
-}
-
-static void
-textlog_clear (T_textlog *log)
-{
-    log->count = 0;
-    log->next = 0;
-}
-
-static void
-render_textlog (SDL_Surface *dst, const SDL_Rect *rect, const T_textlog *log)
-{
-    int line_h = misc_font_line_height ();
-    int visible = rect->h / (line_h ? line_h : 1);
-    int i, y;
-    int first; /* ring-buffer index of the first line to draw */
-
-    if (visible > log->count)
-        visible = log->count;
-    if (visible <= 0)
-        return;
-
-    /* Most recent line is at (log->next - 1); walk back `visible` lines
-     * from there to find where to start, then draw forward top-to-bottom
-     * so the newest line ends up at the bottom -- a chat window, not a
-     * top-down log. */
-    first = (log->next - visible + LOG_MAXLINES) % LOG_MAXLINES;
-
-    y = rect->y + rect->h - visible * line_h;
-    for (i = 0; i < visible; i++) {
-        const T_logline *line = &log->lines[(first + i) % LOG_MAXLINES];
-        int x = rect->x;
-        int r;
-        for (r = 0; r < line->runcount; r++)
-            x += misc_font_render (dst, x, y, &line->runs[r].style,
-                                    line->runs[r].text, strlen (line->runs[r].text));
-        y += line_h;
-    }
-}
-
 void fields_attdefmsg (char *text)
 {
-    textlog_append (&attdeflog, text);
+    misc_textlog_append (&attdeflog, text);
 }
 
 void fields_attdeffmt (const char *fmt, ...)
@@ -456,7 +361,7 @@ void fields_attdeffmt (const char *fmt, ...)
 
 void fields_attdefclear (void)
 {
-    textlog_clear (&attdeflog);
+    misc_textlog_clear (&attdeflog);
 }
 
 void fields_setlines (int l)
@@ -532,12 +437,12 @@ render_fieldlabel (SDL_Surface *dst, int field, const SDL_Rect *rect)
 
 void fields_gmsgadd (const char *str)
 {
-    textlog_append (&gmsglog, str);
+    misc_textlog_append (&gmsglog, str);
 }
 
 void fields_gmsgclear (void)
 {
-    textlog_clear (&gmsglog);
+    misc_textlog_clear (&gmsglog);
 }
 
 void fields_gmsginput (int i)
@@ -623,7 +528,7 @@ void fields_render (SDL_Surface *dst)
     render_specials (dst);
     render_labels (dst);
 
-    render_textlog (dst, &attdef_rect, &attdeflog);
-    render_textlog (dst, &gmsg_rect, &gmsglog);
+    misc_textlog_render (dst, &attdef_rect, &attdeflog);
+    misc_textlog_render (dst, &gmsg_rect, &gmsglog);
     render_gmsginput (dst);
 }

@@ -137,3 +137,40 @@ extern int misc_font_render (SDL_Surface *dst, int x, int y, const T_textstyle *
 /* Height in pixels of a line of text at the loaded font's size -- callers
  * use this to lay out successive lines in a scrollback buffer. */
 extern int misc_font_line_height (void);
+
+/* --- Scrolling formatted-text log: shared by fields.c's attack/defense
+ * log + in-game chat, and partyline.c's chat window. Originally each
+ * caller's own private ring buffer of {style, text} runs per line
+ * (matching the runs misc_parse_formatted() emits); pulled up into
+ * misc.c once a second consumer (partyline.c) needed the exact same
+ * thing, rather than duplicating the ring-buffer logic a second time. */
+
+#define MISC_TEXTLOG_MAXLINES 256
+#define MISC_TEXTLOG_RUNS_PER_LINE 16
+#define MISC_TEXTLOG_RUN_TEXT_MAX 256
+
+typedef struct {
+    T_textstyle style;
+    char text[MISC_TEXTLOG_RUN_TEXT_MAX];
+} T_logrun;
+
+typedef struct {
+    T_logrun runs[MISC_TEXTLOG_RUNS_PER_LINE];
+    int runcount;
+} T_logline;
+
+typedef struct {
+    T_logline lines[MISC_TEXTLOG_MAXLINES];
+    int count; /* number of valid lines, capped at MISC_TEXTLOG_MAXLINES */
+    int next;  /* ring-buffer write position */
+} T_textlog;
+
+/* Parses str via misc_parse_formatted() and appends it as one new line
+ * (the ring buffer's oldest line is silently overwritten once full,
+ * same as a real chat window scrolling old lines away). */
+extern void misc_textlog_append (T_textlog *log, const char *str);
+extern void misc_textlog_clear (T_textlog *log);
+
+/* Draws as many of the most recent lines as fit in rect's height,
+ * newest line at the bottom (a chat window, not a top-down log). */
+extern void misc_textlog_render (SDL_Surface *dst, const SDL_Rect *rect, const T_textlog *log);
