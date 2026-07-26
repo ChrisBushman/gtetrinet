@@ -172,8 +172,13 @@ fields_setup_layout (void)
     if (right_col_w < specials_w)
         right_col_w = specials_w;
 
+    /* render_fieldlabel() draws opponent field 1's name ("Not playing"
+       until it joins) at rect->y + rect->h + 2, directly below the
+       opponent-field row -- a bare MARGIN gap here isn't tall enough
+       to clear a full text line, so it collided with the next-piece
+       box/Lines:/Level: labels starting right at this y. */
     nextpiece_rect.x = right_col_x;
-    nextpiece_rect.y = MARGIN + smallfield_h + MARGIN;
+    nextpiece_rect.y = MARGIN + smallfield_h + MARGIN + misc_font_line_height ();
     nextpiece_rect.w = nextpiece_size;
     nextpiece_rect.h = nextpiece_size;
 

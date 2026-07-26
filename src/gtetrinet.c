@@ -108,7 +108,11 @@ video_flip (void)
 static void
 set_window_icon (void)
 {
-    SDL_Surface *icon = IMG_Load (GTETPIXMAPSDIR "/gtetrinet.png");
+    /* gtetrinet.png is the repo's top-level app icon/about-logo asset,
+       not one of the per-widget pixmaps under icons/ (team.png,
+       alone.png) that GTETPIXMAPSDIR points at -- it lives directly
+       under GTETRINET_DATA instead. */
+    SDL_Surface *icon = IMG_Load (GTETRINET_DATA "/gtetrinet.png");
     if (!icon)
         return;
 #if SDL_MAJOR_VERSION >= 2
@@ -475,7 +479,10 @@ main (int argc, char *argv[])
     SDL_EnableKeyRepeat (SDL_DEFAULT_REPEAT_DELAY, SDL_DEFAULT_REPEAT_INTERVAL);
 #endif
 
-    if (misc_font_init (GTETRINET_DATA "/fonts/DejaVuSans.ttf", 14) != 0)
+    /* Bundled font lives at data/fonts/, not GTETRINET_DATA/fonts/
+       directly -- "data" here is this repo's own top-level directory
+       name, unrelated to the GTETRINET_DATA build constant. */
+    if (misc_font_init (GTETRINET_DATA "/data/fonts/DejaVuSans.ttf", 14) != 0)
         fprintf (stderr, "Warning: could not load bundled font, text will not render.\n");
 
     if (sound_init () != 0)
