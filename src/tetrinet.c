@@ -22,11 +22,14 @@
 #include <config.h>
 #endif
 
+/* gtk.h is only still needed here for the one remaining
+ * gtk_message_dialog_new() call (a connection-error dialog) --
+ * dialogs.c (not yet ported) will own a portable equivalent later. */
 #include <gtk/gtk.h>
 #include <glib/gi18n.h>
 #include <stdlib.h>
 #include <string.h>
-#include <gdk/gdkkeysyms.h>
+#include <SDL.h>
 #include <unistd.h>
 #include <stdio.h>
 #include <ctype.h>
@@ -1714,12 +1717,12 @@ int tetrinet_key (int keyval)
     if (spectating) {
         /* spectator keys */
         switch (keyval) {
-        case GDK_KEY_1: bigfieldnum = 1; break;
-        case GDK_KEY_2: bigfieldnum = 2; break;
-        case GDK_KEY_3: bigfieldnum = 3; break;
-        case GDK_KEY_4: bigfieldnum = 4; break;
-        case GDK_KEY_5: bigfieldnum = 5; break;
-        case GDK_KEY_6: bigfieldnum = 6; break;
+        case SDLK_1: bigfieldnum = 1; break;
+        case SDLK_2: bigfieldnum = 2; break;
+        case SDLK_3: bigfieldnum = 3; break;
+        case SDLK_4: bigfieldnum = 4; break;
+        case SDLK_5: bigfieldnum = 5; break;
+        case SDLK_6: bigfieldnum = 6; break;
         default:    goto notfieldkey;
         }
         tetrinet_updatelevels ();
@@ -1728,7 +1731,7 @@ int tetrinet_key (int keyval)
     }
 notfieldkey:
     if (!ingame) return FALSE;
-    if (gdk_keyval_to_lower (keyval) == keys[K_GAMEMSG]) {
+    if (keyval == keys[K_GAMEMSG]) {
         fields_gmsginput (TRUE);
         gmsgstate = 1;
         tetris_drawcurrentblock ();
@@ -1736,31 +1739,31 @@ notfieldkey:
     }
     if (paused || !playing) return FALSE;
     /* game keys */
-    if (gdk_keyval_to_lower (keyval) == keys[K_ROTRIGHT]) {
+    if (keyval == keys[K_ROTRIGHT]) {
         if (!nextblocktimeout)
             sound_playsound (S_ROTATE);
         tetris_blockrotate (1);
         tetris_drawcurrentblock ();
         return TRUE;
     }
-    else if (gdk_keyval_to_lower (keyval) == keys[K_ROTLEFT]) {
+    else if (keyval == keys[K_ROTLEFT]) {
         if (!nextblocktimeout)
             sound_playsound (S_ROTATE);
         tetris_blockrotate (-1);
         tetris_drawcurrentblock ();
         return TRUE;
     }
-    else if (gdk_keyval_to_lower (keyval) == keys[K_RIGHT]) {
+    else if (keyval == keys[K_RIGHT]) {
         tetris_blockmove (1);
         tetris_drawcurrentblock ();
         return TRUE;
     }
-    else if (gdk_keyval_to_lower (keyval) == keys[K_LEFT]) {
+    else if (keyval == keys[K_LEFT]) {
         tetris_blockmove (-1);
         tetris_drawcurrentblock ();
         return TRUE;
     }
-    else if (gdk_keyval_to_lower (keyval) == keys[K_DOWN]) {
+    else if (keyval == keys[K_DOWN]) {
         if (!downpressed) {
             tetrinet_timeout ();
             downpressed = 1;
@@ -1769,7 +1772,7 @@ notfieldkey:
         tetris_drawcurrentblock ();
         return TRUE;
     }
-    else if (gdk_keyval_to_lower (keyval) == keys[K_DROP]) {
+    else if (keyval == keys[K_DROP]) {
         int sound;
         if (!nextblocktimeout) {
             tetris_blockdrop ();
@@ -1783,37 +1786,37 @@ notfieldkey:
         tetris_drawcurrentblock ();
         return TRUE;
     }
-    else if (gdk_keyval_to_lower (keyval) == keys[K_DISCARD]) {
+    else if (keyval == keys[K_DISCARD]) {
         tetrinet_specialkey(-1);
         tetris_drawcurrentblock ();
         return TRUE;
     }
-    else if (gdk_keyval_to_lower (keyval) == keys[K_SPECIAL1]) {
+    else if (keyval == keys[K_SPECIAL1]) {
 	tetrinet_specialkey(1);
         tetris_drawcurrentblock ();
         return TRUE;
     }
-    else if (gdk_keyval_to_lower (keyval) == keys[K_SPECIAL2]) {
+    else if (keyval == keys[K_SPECIAL2]) {
 	tetrinet_specialkey(2);
         tetris_drawcurrentblock ();
         return TRUE;
     }
-    else if (gdk_keyval_to_lower (keyval) == keys[K_SPECIAL3]) {
+    else if (keyval == keys[K_SPECIAL3]) {
 	tetrinet_specialkey(3);
         tetris_drawcurrentblock ();
         return TRUE;
     }
-    else if (gdk_keyval_to_lower (keyval) == keys[K_SPECIAL4]) {
+    else if (keyval == keys[K_SPECIAL4]) {
 	tetrinet_specialkey(4);
         tetris_drawcurrentblock ();
         return TRUE;
     }
-    else if (gdk_keyval_to_lower (keyval) == keys[K_SPECIAL5]) {
+    else if (keyval == keys[K_SPECIAL5]) {
 	tetrinet_specialkey(5);
         tetris_drawcurrentblock ();
         return TRUE;
     }
-    else if (gdk_keyval_to_lower (keyval) == keys[K_SPECIAL6]) {
+    else if (keyval == keys[K_SPECIAL6]) {
 	tetrinet_specialkey(6);
         tetris_drawcurrentblock ();
         return TRUE;
@@ -1825,7 +1828,7 @@ notfieldkey:
 void tetrinet_upkey (int keyval)
 {
     if (!playing) return;
-    if (gdk_keyval_to_lower (keyval) == keys[K_DOWN]) {
+    if (keyval == keys[K_DOWN]) {
          /* if it is a quick press, nudge it down one more step */
         if (downpressed == 1) tetrinet_timeout ();
         downpressed = 0;

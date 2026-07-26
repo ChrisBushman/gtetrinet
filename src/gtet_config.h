@@ -1,12 +1,19 @@
-#define GSETTINGS_DOMAIN "gtetrinet"
-#define GSETTINGS_DOMAIN_KEYS "gtetrinet.keys"
-#define GSETTINGS_DOMAIN_THEMES "gtetrinet.themes"
-
 extern char blocksfile[1024];
 extern int bsize;
 extern GString *currenttheme;
-extern guint keys[];
-extern guint defaultkeys[];
+
+/* SDL_Keycode (SDL2) / SDLKey (SDL 1.2) values -- both are plain
+ * integer-compatible types, so "int" here works unmodified against
+ * either SDL version's headers, matching how tetrinet_key()/
+ * tetrinet_upkey() already take a plain "int keyval" rather than a
+ * GDK-specific type. GDK's case-insensitive gdk_keyval_to_lower()
+ * comparison this replaced is not needed for SDL keycodes: unlike GDK
+ * keyvals (where Shift+a and a are different keyval numbers), SDL
+ * keycodes for letters are already shift-independent -- SDLK_a means
+ * "the A key was pressed", with Shift reported separately as a
+ * modifier, not folded into a different keycode. */
+extern int keys[];
+extern int defaultkeys[];
 
 extern void config_loadtheme (const gchar *themedir);
 extern int config_getthemeinfo (char *themedir, char *name, char *author, char *desc);

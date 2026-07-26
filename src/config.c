@@ -21,22 +21,29 @@
 #include <config.h>
 #endif
 
-#include <gtk/gtk.h>
-#include <gdk/gdkkeysyms.h>
-#include <glib/gi18n.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <glib.h>
+#include <SDL.h>
 
 #include "gtet_config.h"
-#include "gtetrinet.h"
 #include "client.h"
 #include "tetrinet.h"
 #include "sound.h"
 #include "misc.h"
 #include "tetris.h"
 #include "fields.h"
-#include "partyline.h"
+
+/* gtetrinet.h/partyline.h are still GTK-typed (gtetrinet.c/partyline.c
+ * haven't been ported yet), so they aren't included here -- just the
+ * plain declarations this file actually needs from them. Restore the
+ * real includes once those files are ported in a later pass. */
+extern int gamemode;
+extern int timestampsenable;
+extern int list_enabled;
+extern void partyline_show_channel_list (int enabled);
 
 char blocksfile[1024];
 int bsize;
@@ -56,24 +63,136 @@ static char *soundkeys[S_NUM] = {
     "GameStart",
 };
 
-guint defaultkeys[K_NUM] = {
-    GDK_KEY_Right,
-    GDK_KEY_Left,
-    GDK_KEY_Up,
-    GDK_KEY_Control_R,
-    GDK_KEY_Down,
-    GDK_KEY_space,
-    GDK_KEY_d,
-    GDK_KEY_t,
-    GDK_KEY_1,
-    GDK_KEY_2,
-    GDK_KEY_3,
-    GDK_KEY_4,
-    GDK_KEY_5,
-    GDK_KEY_6
+/* See gtet_config.h for why plain SDL keycodes (rather than GDK keyvals)
+ * are used, and why no case-normalization step is needed. */
+int defaultkeys[K_NUM] = {
+    SDLK_RIGHT,
+    SDLK_LEFT,
+    SDLK_UP,
+    SDLK_RCTRL,
+    SDLK_DOWN,
+    SDLK_SPACE,
+    SDLK_d,
+    SDLK_t,
+    SDLK_1,
+    SDLK_2,
+    SDLK_3,
+    SDLK_4,
+    SDLK_5,
+    SDLK_6
 };
 
-guint keys[K_NUM];
+int keys[K_NUM];
+
+/* --- ini-based settings storage, replacing GSettings/dconf --- */
+
+static GKeyFile *cfg = NULL;
+static char cfg_path[1024];
+
+static void
+config_ensure_loaded (void)
+{
+    char *dir;
+
+    if (cfg != NULL)
+        return;
+
+    dir = g_build_filename (g_get_user_config_dir (), "gtetrinet", NULL);
+    g_mkdir_with_parents (dir, 0700);
+    GTET_O_STRCPY (cfg_path, dir);
+    GTET_O_STRCAT (cfg_path, G_DIR_SEPARATOR_S "config.ini");
+    g_free (dir);
+
+    cfg = g_key_file_new ();
+    /* Missing file is fine -- every config_get_* below has its own
+     * default for a key (or whole file) that isn't there yet, exactly
+     * like g_settings_get_* always returning the schema's default for
+     * a never-set key. */
+    g_key_file_load_from_file (cfg, cfg_path, G_KEY_FILE_NONE, NULL);
+}
+
+static void
+config_save (void)
+{
+    gchar *data;
+    gsize len;
+
+    data = g_key_file_to_data (cfg, &len, NULL);
+    g_file_set_contents (cfg_path, data, len, NULL);
+    g_free (data);
+}
+
+/* Returned string must be g_free()'d by the caller; NULL if unset. */
+static gchar *
+config_get_string (const char *group, const char *key)
+{
+    config_ensure_loaded ();
+    return g_key_file_get_string (cfg, group, key, NULL);
+}
+
+static void
+config_set_string (const char *group, const char *key, const char *val)
+{
+    config_ensure_loaded ();
+    g_key_file_set_string (cfg, group, key, val);
+    config_save ();
+}
+
+static gboolean
+config_get_bool (const char *group, const char *key, gboolean def)
+{
+    GError *err = NULL;
+    gboolean v;
+
+    config_ensure_loaded ();
+    v = g_key_file_get_boolean (cfg, group, key, &err);
+    if (err) {
+        g_error_free (err);
+        return def;
+    }
+    return v;
+}
+
+/* --- key-name <-> SDL keycode lookup, replacing gdk_keyval_from_name ---
+ *
+ * gdk_keyval_from_name()/gdk_keyval_to_lower() don't exist outside GDK,
+ * and SDL_GetKeyFromName() (the SDL2 equivalent) doesn't exist in real
+ * SDL 1.2, which the OS X Tiger/PPC and IRIX ports use -- so this is a
+ * small hand-written table instead, covering every key a player could
+ * plausibly rebind to. Names match what the original GDK-based config
+ * used where they overlap (Right/Left/Up/Down/space/Control_R), so an
+ * old hand-edited value still resolves the same way. */
+struct keyname { const char *name; int keycode; };
+
+static const struct keyname keynames[] = {
+    {"Right", SDLK_RIGHT}, {"Left", SDLK_LEFT}, {"Up", SDLK_UP}, {"Down", SDLK_DOWN},
+    {"space", SDLK_SPACE},
+    {"Control_R", SDLK_RCTRL}, {"Control_L", SDLK_LCTRL},
+    {"Shift_R", SDLK_RSHIFT}, {"Shift_L", SDLK_LSHIFT},
+    {"Alt_R", SDLK_RALT}, {"Alt_L", SDLK_LALT},
+    {"Tab", SDLK_TAB}, {"Return", SDLK_RETURN}, {"Escape", SDLK_ESCAPE},
+    {"a", SDLK_a}, {"b", SDLK_b}, {"c", SDLK_c}, {"d", SDLK_d}, {"e", SDLK_e},
+    {"f", SDLK_f}, {"g", SDLK_g}, {"h", SDLK_h}, {"i", SDLK_i}, {"j", SDLK_j},
+    {"k", SDLK_k}, {"l", SDLK_l}, {"m", SDLK_m}, {"n", SDLK_n}, {"o", SDLK_o},
+    {"p", SDLK_p}, {"q", SDLK_q}, {"r", SDLK_r}, {"s", SDLK_s}, {"t", SDLK_t},
+    {"u", SDLK_u}, {"v", SDLK_v}, {"w", SDLK_w}, {"x", SDLK_x}, {"y", SDLK_y},
+    {"z", SDLK_z},
+    {"0", SDLK_0}, {"1", SDLK_1}, {"2", SDLK_2}, {"3", SDLK_3}, {"4", SDLK_4},
+    {"5", SDLK_5}, {"6", SDLK_6}, {"7", SDLK_7}, {"8", SDLK_8}, {"9", SDLK_9},
+    {NULL, 0}
+};
+
+/* Returns 0 (never a valid SDL keycode for these bindings) if name isn't
+ * recognized -- caller falls back to the compiled-in default. */
+static int
+keyname_to_code (const char *name)
+{
+    int i;
+    for (i = 0; keynames[i].name != NULL; i++)
+        if (strcmp (keynames[i].name, name) == 0)
+            return keynames[i].keycode;
+    return 0;
+}
 
 void load_theme (const gchar *theme_dir)
 {
@@ -116,7 +235,7 @@ void config_loadtheme (const gchar *themedir)
     p = g_key_file_get_string (keyfile, "Graphics", "Blocks", NULL);
     if (!p)
       p = g_strdup("blocks.png");
-    
+
     GTET_O_STRCPY(blocksfile, themedir);
     GTET_O_STRCAT(blocksfile, p);
     g_free (p);
@@ -147,15 +266,11 @@ void config_loadtheme (const gchar *themedir)
 
  bad_theme:
     {
-      GtkWidget *mb;
-      mb = gtk_message_dialog_new (NULL,
-                                   0,
-                                   GTK_MESSAGE_WARNING,
-                                   GTK_BUTTONS_OK,
-                                   _("Warning: theme does not have a name, "
-                                     "reverting to default."));
-      gtk_dialog_run (GTK_DIALOG (mb));
-      gtk_widget_destroy (mb);
+      /* Was a GTK modal warning dialog -- dialogs.c (not yet ported)
+       * owns the app's dialog/messagebox machinery going forward, so
+       * for now this just logs, matching fields_init()'s own fallback
+       * message for the equivalent "can't load this theme" case. */
+      fprintf (stderr, "Warning: theme '%s' does not have a name, reverting to default.\n", themedir);
       g_key_file_unref (keyfile);
       g_string_assign(currenttheme, DEFAULTTHEME);
       config_loadtheme (currenttheme->str);
@@ -214,40 +329,40 @@ void config_loadconfig (void)
     gchar *p;
 
     /* get the other sound options */
-    soundenable = g_settings_get_boolean (settings, "sound-enable");
+    soundenable = config_get_bool ("General", "sound-enable", TRUE);
     if (soundenable) {
         sound_cache ();
     }
 
     /* get the player nickname */
-    p = g_settings_get_string (settings, "player-nickname");
+    p = config_get_string ("General", "player-nickname");
     if (p) {
         GTET_O_STRCPY(nick, p);
         g_free(p);
     }
 
     /* get the server name */
-    p = g_settings_get_string (settings, "server");
+    p = config_get_string ("General", "server");
     if (p) {
         GTET_O_STRCPY(server, p);
         g_free(p);
     }
 
     /* get the team name */
-    p = g_settings_get_string (settings, "player-team");
+    p = config_get_string ("General", "player-team");
     if (p) {
         GTET_O_STRCPY(team, p);
         g_free(p);
     }
-	 
+
     /* get the game mode */
-    gamemode = g_settings_get_boolean (settings, "gamemode");
+    gamemode = config_get_bool ("General", "gamemode", FALSE);
 
     /* Get the timestamp option. */
-    timestampsenable = g_settings_get_boolean (settings, "partyline-enable-timestamps");
+    timestampsenable = config_get_bool ("General", "partyline-enable-timestamps", FALSE);
 
     /* Get the channel list option */
-    list_enabled = g_settings_get_boolean (settings, "partyline-enable-channel-list");
+    list_enabled = config_get_bool ("General", "partyline-enable-channel-list", TRUE);
 
     partyline_show_channel_list(list_enabled);
 }
@@ -257,19 +372,19 @@ void config_loadconfig_themes (void)
     gchar *p;
 
     currenttheme = g_string_sized_new(100);
-    
+
     /* get the current theme */
-    p = g_settings_get_string (settings_themes, "directory");
+    p = config_get_string ("Theme", "directory");
     /* if there is no theme configured, then we fallback to DEFAULTTHEME */
     if (!p || !p[0])
     {
       g_string_assign(currenttheme, DEFAULTTHEME);
-      g_settings_set_string (settings_themes, "directory", currenttheme->str);
+      config_set_string ("Theme", "directory", currenttheme->str);
     }
     else
       g_string_assign(currenttheme, p);
-    g_free (p);
-    
+    if (p) g_free (p);
+
     /* add trailing slash if none exists */
     if (currenttheme->str[currenttheme->len - 1] != '/')
       g_string_append_c(currenttheme, '/');
@@ -279,133 +394,35 @@ void config_loadconfig_themes (void)
 
 void config_loadconfig_keys (void)
 {
-    gchar *p;
+    /* {ini-file key name, GTetrinetKeys index} -- replaces 14 nearly-
+     * identical g_settings_get_string()+gdk_keyval_from_name() blocks
+     * with one data-driven loop. */
+    static const struct { const char *cfgkey; int keyidx; } keybindings[] = {
+        {"right",        K_RIGHT},
+        {"left",         K_LEFT},
+        {"rotate-right", K_ROTRIGHT},
+        {"rotate-left",  K_ROTLEFT},
+        {"down",         K_DOWN},
+        {"drop",         K_DROP},
+        {"discard",      K_DISCARD},
+        {"message",      K_GAMEMSG},
+        {"special1",     K_SPECIAL1},
+        {"special2",     K_SPECIAL2},
+        {"special3",     K_SPECIAL3},
+        {"special4",     K_SPECIAL4},
+        {"special5",     K_SPECIAL5},
+        {"special6",     K_SPECIAL6},
+    };
+    int i;
 
-    /* get the keys */
-    p = g_settings_get_string (settings_keys, "right");
-    if (p)
-    {
-      keys[K_RIGHT] = gdk_keyval_to_lower (gdk_keyval_from_name (p));
-      g_free (p);
-    }
-    else
-      keys[K_RIGHT] = defaultkeys[K_RIGHT];
-    
-    p = g_settings_get_string (settings_keys, "left");
-    if (p)
-    {
-      keys[K_LEFT] = gdk_keyval_to_lower (gdk_keyval_from_name (p));
-      g_free (p);
-    }
-    else
-      keys[K_LEFT] = defaultkeys[K_LEFT];
+    for (i = 0; i < K_NUM; i++) {
+        gchar *p = config_get_string ("Keys", keybindings[i].cfgkey);
+        int code = 0;
 
-    p = g_settings_get_string (settings_keys, "rotate-right");
-    if (p)
-    {
-      keys[K_ROTRIGHT] = gdk_keyval_to_lower (gdk_keyval_from_name (p));
-      g_free (p);
+        if (p) {
+            code = keyname_to_code (p);
+            g_free (p);
+        }
+        keys[keybindings[i].keyidx] = code ? code : defaultkeys[keybindings[i].keyidx];
     }
-    else
-      keys[K_ROTRIGHT] = defaultkeys[K_ROTRIGHT];
-
-    p = g_settings_get_string (settings_keys, "rotate-left");
-    if (p)
-    {
-      keys[K_ROTLEFT] = gdk_keyval_to_lower (gdk_keyval_from_name (p));
-      g_free (p);
-    }
-    else
-      keys[K_ROTLEFT] = defaultkeys[K_ROTLEFT];
-
-    p = g_settings_get_string (settings_keys, "down");
-    if (p)
-    {
-      keys[K_DOWN] = gdk_keyval_to_lower (gdk_keyval_from_name (p));
-      g_free (p);
-    }
-    else
-      keys[K_DOWN] = defaultkeys[K_DOWN];
-
-    p = g_settings_get_string (settings_keys, "drop");
-    if (p)
-    {
-      keys[K_DROP] = gdk_keyval_to_lower (gdk_keyval_from_name (p));
-      g_free (p);
-    }
-    else
-      keys[K_DROP] = defaultkeys[K_DROP];
-
-    p = g_settings_get_string (settings_keys, "discard");
-    if (p)
-    {
-      keys[K_DISCARD] = gdk_keyval_to_lower (gdk_keyval_from_name (p));
-      g_free (p);
-    }
-    else
-      keys[K_DISCARD] = defaultkeys[K_DISCARD];
-
-    p = g_settings_get_string (settings_keys, "message");
-    if (p)
-    {
-      keys[K_GAMEMSG] = gdk_keyval_to_lower (gdk_keyval_from_name (p));
-      g_free (p);
-    }
-    else
-      keys[K_GAMEMSG] = defaultkeys[K_GAMEMSG];
-
-    p = g_settings_get_string (settings_keys, "special1");
-    if (p)
-    {
-      keys[K_SPECIAL1] = gdk_keyval_to_lower (gdk_keyval_from_name (p));
-      g_free (p);
-    }
-    else
-      keys[K_SPECIAL1] = defaultkeys[K_SPECIAL1];
-
-    p = g_settings_get_string (settings_keys, "special2");
-    if (p)
-    {
-      keys[K_SPECIAL2] = gdk_keyval_to_lower (gdk_keyval_from_name (p));
-      g_free (p);
-    }
-    else
-      keys[K_SPECIAL2] = defaultkeys[K_SPECIAL2];
-
-    p = g_settings_get_string (settings_keys, "special3");
-    if (p)
-    {
-      keys[K_SPECIAL3] = gdk_keyval_to_lower (gdk_keyval_from_name (p));
-      g_free (p);
-    }
-    else
-      keys[K_SPECIAL3] = defaultkeys[K_SPECIAL3];
-
-    p = g_settings_get_string (settings_keys, "special4");
-    if (p)
-    {
-      keys[K_SPECIAL4] = gdk_keyval_to_lower (gdk_keyval_from_name (p));
-      g_free (p);
-    }
-    else
-      keys[K_SPECIAL4] = defaultkeys[K_SPECIAL4];
-
-    p = g_settings_get_string (settings_keys, "special5");
-    if (p)
-    {
-      keys[K_SPECIAL5] = gdk_keyval_to_lower (gdk_keyval_from_name (p));
-      g_free (p);
-    }
-    else
-      keys[K_SPECIAL5] = defaultkeys[K_SPECIAL5];
-
-    p = g_settings_get_string (settings_keys, "special6");
-    if (p)
-    {
-      keys[K_SPECIAL6] = gdk_keyval_to_lower (gdk_keyval_from_name (p));
-      g_free (p);
-    }
-    else
-      keys[K_SPECIAL6] = defaultkeys[K_SPECIAL6];
 }
-
