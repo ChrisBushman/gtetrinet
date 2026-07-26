@@ -34,6 +34,18 @@ enum outmsg_type {
 extern void client_init (const char *server, const char *nick);
 extern void client_disconnect (void);
 
+/* Set to 1 by the app's main loop once it actually starts running (see
+   client.c for why -- stands in for GTK's gtk_main_level() check). */
+extern int app_mainloop_running;
+
+/* Call both of these once per frame from the app's main loop; both are
+   safe to call unconditionally (no-ops when nothing is pending/connected).
+   client_poll_connect() drives the non-blocking hostname-resolve/connect
+   sequence client_init() kicks off; client_poll_socket() replaces the
+   old GIOChannel watch for incoming server data once connected. */
+extern void client_poll_connect (void);
+extern void client_poll_socket (void);
+
 /* for sending stuff back and forth */
 extern void client_outmessage (enum outmsg_type msgtype, char *str);
 extern void client_inmessage (char *str);

@@ -41,6 +41,7 @@
 #include "dialogs.h"
 #include "misc.h"
 #include "gtetrinet.h"
+#include "sched.h"
 
 #define PORT 31457
 #define SPECPORT 31458
@@ -48,9 +49,20 @@
 int connected;
 char server[128];
 
+/* Set once the SDL app's own per-frame event loop has actually started
+   (mirrors GTK's gtk_main_level() > 0, which client_disconnect() used to
+   check to decide whether emitting a synthetic "disconnect" inmessage
+   made sense yet). Owned and set by the app's main loop startup code. */
+int app_mainloop_running = 0;
+
 static int sock;
-static GIOChannel *io_channel;
-static guint source;
+/* connect_pending: client_process() kicks off the background resolve
+   thread and returns immediately instead of blocking (there is no GTK
+   main loop to spin via gtk_main_iteration() while waiting) -- 1 while a
+   resolve+connect is in flight, checked by client_poll_connect(), which
+   the app calls once per frame to pick up where client_process() left
+   off once `resolved` is set by the background thread. */
+static int connect_pending;
 static int resolved;
 
 /* structures and arrays for message translation */
@@ -149,9 +161,9 @@ struct outmsgt outmsgtable[] = {
 static void client_process (void);
 static gpointer client_resolv_hostname (void);
 static void client_connected (void);
+static void client_finish_connecting (void);
 
 /* some other useful functions */
-static gboolean io_channel_cb (GIOChannel *source, GIOCondition condition);
 static int client_sendmsg (char *str);
 static int client_readmsg (gchar **str);
 static void server_ip (unsigned char buf[4]);
@@ -212,29 +224,42 @@ void client_inmessage (char *str)
 
 /* these functions set up the connection */
 
+/* GThread handle for the in-flight resolve/connect, joined once
+   `resolved` is set. Previously a local in client_process() -- now needs
+   to outlive that function since it returns immediately instead of
+   blocking until the thread finishes. */
+static GThread *resolve_thread;
+
 void client_process (void)
 {
-  GString *s1 = g_string_sized_new(80);
-  GString *s2 = g_string_sized_new(80);
-  unsigned char ip[4];
-  GString *iphashbuf = g_string_sized_new(11);
-  unsigned int i, len;
-  int l;
-  GThread *thread;
-        
   errno = 0;
   resolved = 0;
-  
-  thread = g_thread_new ("resolve", (GThreadFunc) client_resolv_hostname, NULL);
-  
-  /* wait until the hostname is resolved */
-  while (resolved == 0)
-  {
-    if (gtk_events_pending ())
-      gtk_main_iteration ();
-  }
+  connect_pending = 1;
 
-  g_thread_join (thread);
+  resolve_thread = g_thread_new ("resolve", (GThreadFunc) client_resolv_hostname, NULL);
+
+  /* Previously this function blocked here, spinning gtk_main_iteration()
+     until `resolved` was set by the background thread. There is no GTK
+     main loop in the SDL port to spin -- client_poll_connect() (called
+     once per frame by the app's main loop) picks up where this left off:
+     it checks `resolved` each frame and calls client_finish_connecting()
+     once the background thread is done, exactly the same work this
+     function used to do synchronously below this point. */
+}
+
+/* Called once per frame by the app's main loop while a connection
+   attempt is in flight (i.e. after client_init(), until this stops
+   being needed). No-op once nothing is pending, so it's always safe to
+   call unconditionally from the main loop. */
+void client_poll_connect (void)
+{
+  if (!connect_pending)
+    return;
+  if (resolved == 0)
+    return; /* still waiting on the background thread */
+
+  g_thread_join (resolve_thread);
+  connect_pending = 0;
 
   if (resolved == -1) {
     char errmsg[1024];
@@ -245,17 +270,31 @@ void client_process (void)
     else if (h_errno) GTET_O_STRCAT(errmsg, _("Couldn't resolve hostname."));
 
     client_inmessage (errmsg);
-    
-    return;
- }
 
-  /**
-   * Set up the g_io_channel
-   * We should set it with no encoding and no buffering, just to simplify things */
-  io_channel = g_io_channel_unix_new (sock);
-  g_io_channel_set_encoding (io_channel, NULL, NULL);
-  g_io_channel_set_buffered (io_channel, FALSE);
-  source = g_io_add_watch (io_channel, G_IO_IN, (GIOFunc)io_channel_cb, NULL);
+    return;
+  }
+
+  client_finish_connecting ();
+}
+
+/* The part of the old client_process() that ran after the hostname was
+   resolved and the socket connected: send the handshake. Split out into
+   its own function so client_poll_connect() can call it once resolved,
+   without duplicating the encoding logic. */
+static void client_finish_connecting (void)
+{
+  GString *s1 = g_string_sized_new(80);
+  GString *s2 = g_string_sized_new(80);
+  unsigned char ip[4];
+  GString *iphashbuf = g_string_sized_new(11);
+  unsigned int i, len;
+  int l;
+
+  /* The socket is a plain BSD socket (still blocking-mode, as
+     client_resolv_hostname() left it) -- client_poll_socket() (called
+     once per frame) polls it for readability with a zero-timeout
+     select() rather than relying on a GIOChannel watch tied to a GLib
+     main loop. */
 
   /* construct message */
   if (gamemode == TETRIFAST)
@@ -349,14 +388,19 @@ void client_disconnect (void)
 {
     if (connected)
     {
-      if (gtk_main_level())
+      /* app_mainloop_running stands in for GTK's gtk_main_level() check:
+         both exist for the same reason -- don't synthesize a
+         "disconnect" inmessage if the rest of the app (UI, state
+         machine) isn't actually up and running yet to receive it (e.g.
+         during early startup/teardown paths outside the normal frame
+         loop). */
+      if (app_mainloop_running)
         client_inmessage ("disconnect");
-      g_source_destroy (g_main_context_find_source_by_id (NULL, source));
-      g_io_channel_shutdown (io_channel, TRUE, NULL);
-      g_io_channel_unref (io_channel);
+      sched_remove_all ();
       shutdown (sock, 2);
       close (sock);
       connected = 0;
+      connect_pending = 0;
 
       // Allow for sending the blocktrix init on reconnect.
       pnumrec = 0;
@@ -366,50 +410,76 @@ void client_disconnect (void)
 
 /* some other useful functions */
 
-static gboolean
-io_channel_cb (GIOChannel *source, GIOCondition condition)
+/* Called once per frame by the app's main loop while connected. Replaces
+   the old GIOChannel + g_io_add_watch(G_IO_IN, io_channel_cb) setup,
+   which relied on a live GLib main loop to invoke io_channel_cb()
+   whenever the socket had data ready. Here the app's own frame loop is
+   the "watch": a zero-timeout select() checks readability, and if ready,
+   this does exactly what io_channel_cb() used to do. Safe to call
+   unconditionally every frame -- it's a no-op while not connected. */
+void client_poll_socket (void)
 {
+  fd_set readfds;
+  struct timeval tv;
   gchar *buf;
-  
-  source = source; /* get rid of the warnings */
-  
-  switch (condition)
+
+  if (!connected)
+    return;
+
+  FD_ZERO (&readfds);
+  FD_SET (sock, &readfds);
+  tv.tv_sec = 0;
+  tv.tv_usec = 0;
+
+  if (select (sock + 1, &readfds, NULL, NULL, &tv) <= 0)
+    return;
+  if (!FD_ISSET (sock, &readfds))
+    return;
+
+  if (client_readmsg (&buf) < 0)
   {
-    case G_IO_IN :
-    {
-      if (client_readmsg (&buf) < 0)
-      {
-        g_warning ("client_readmsg failed, aborting connection\n");
-        client_disconnect ();
-      }
-      else
-      {
-        if (strlen (buf)) client_inmessage (buf);
-        
-        if (strncmp ("noconnecting", buf, 12) == 0)
-        {
-          connected = 1; /* so we can disconnect :) */
-          client_disconnect ();
-        }
-        g_free (buf);
-      }
-    }; break;
-    default : break;
+    g_warning ("client_readmsg failed, aborting connection\n");
+    client_disconnect ();
   }
-  
-  return TRUE;
+  else
+  {
+    if (strlen (buf)) client_inmessage (buf);
+
+    if (strncmp ("noconnecting", buf, 12) == 0)
+    {
+      connected = 1; /* so we can disconnect :) */
+      client_disconnect ();
+    }
+    g_free (buf);
+  }
 }
 
 int client_sendmsg (char *str)
 {
     gchar *buf;
-    GError *error = NULL;
-    
-    buf = g_strdup(str);
-    buf[strlen(str)] = 0xFF;
-    g_io_channel_write_chars (io_channel, buf, strlen(str)+1, NULL, &error);
-    g_io_channel_flush (io_channel, &error);
-    g_free(buf);
+    size_t len;
+    ssize_t sent;
+
+    len = strlen (str) + 1;
+    buf = g_strdup (str);
+    buf[len - 1] = (gchar) 0xFF;
+
+    /* Loop until the whole message is sent: unlike g_io_channel_write_chars
+       (which buffered/looped internally), a raw send() on a blocking
+       socket can still return a short count if interrupted by a signal
+       (EINTR) or, in principle, a partial kernel-buffer write. */
+    sent = 0;
+    while ((size_t) sent < len) {
+        ssize_t n = send (sock, buf + sent, len - (size_t) sent, 0);
+        if (n < 0) {
+            if (errno == EINTR)
+                continue;
+            g_warning ("client_sendmsg: send() failed: %s", strerror (errno));
+            break;
+        }
+        sent += n;
+    }
+    g_free (buf);
 
 #ifdef DEBUG
     printf ("> %s\n", str);
@@ -420,40 +490,32 @@ int client_sendmsg (char *str)
 
 int client_readmsg (gchar **str)
 {
-    gsize bytes = 0;
     gchar buf[1024];
-    GError *error = NULL;
     gint i = 0;
-  
-    do
+
+    for (;;)
     {
-      switch (g_io_channel_read_chars (io_channel, &buf[i], 1, &bytes, &error))
+      ssize_t n = recv (sock, &buf[i], 1, 0);
+
+      if (n < 0 && errno == EINTR)
+        continue; /* retry the same byte, i unchanged -- not a do/while,
+                     so this correctly re-issues recv() rather than
+                     jumping to a loop condition on stale data */
+      if (n == 0)
       {
-        case G_IO_STATUS_EOF :
-          g_warning ("End of file (server closed connection).");
-          return -1;
-          break;
-        
-        case G_IO_STATUS_AGAIN :
-          g_warning ("Resource temporarily unavailable.");
-          return -1;
-          break;
-        
-        case G_IO_STATUS_ERROR :
-          g_warning ("Error");
-          return -1;
-          break;
-        
-        case G_IO_STATUS_NORMAL :
-          if (error != NULL)
-          {
-            g_warning ("ERROR READING: %s\n", error->message);
-            g_error_free (error);
-            return -1;
-          }; break;
+        g_warning ("End of file (server closed connection).");
+        return -1;
       }
+      if (n < 0)
+      {
+        g_warning ("client_readmsg: recv() failed: %s", strerror (errno));
+        return -1;
+      }
+
       i++;
-    } while ((bytes == 1) && (buf[i-1] != (gchar)0xFF) && (i<1024));
+      if (buf[i-1] == (gchar)0xFF || i >= 1024)
+        break;
+    }
     buf[i-1] = 0;
 
 #ifdef DEBUG

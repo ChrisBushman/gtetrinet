@@ -44,6 +44,7 @@
 #include "dialogs.h"
 #include "sound.h"
 #include "string.h"
+#include "sched.h"
 
 #define NEXTBLOCKDELAY (gamemode==TETRIFAST?0:1000)
 #define DOWNDELAY 100
@@ -187,7 +188,7 @@ void tetrinet_inmessage (enum inmsg_type msgtype, char *data)
     switch (msgtype) {
     case IN_CONNECT:
         list_issued = 0;
-        up_chan_list_source = g_timeout_add (30000, (GSourceFunc) partyline_update_channel_list, NULL);
+        up_chan_list_source = sched_timeout_add (30000, (sched_timer_func) partyline_update_channel_list, NULL);
         partyline_joining_channel ("");
         show_start_button ();
         show_disconnect_button ();
@@ -210,7 +211,7 @@ void tetrinet_inmessage (enum inmsg_type msgtype, char *data)
                 playernames[i][0] = teamnames[i][0] = 0;
             fieldslabelupdate ();
         }
-        g_source_remove (up_chan_list_source);
+        sched_timer_remove (up_chan_list_source);
         winlist_clear ();
         fields_attdefclear ();
         fields_gmsgclear ();
@@ -1511,9 +1512,9 @@ void tetrinet_playerlost (void)
     sound_playsound (S_YOULOSE);
     /* end timeout thingies */
     if (movedowntimeout)
-        g_source_remove (movedowntimeout);
+        sched_timer_remove (movedowntimeout);
     if (nextblocktimeout)
-        g_source_remove (nextblocktimeout);
+        sched_timer_remove (nextblocktimeout);
     movedowntimeout = nextblocktimeout = 0;
     tetris_makeblock (-1, 0);
 }
@@ -1527,9 +1528,9 @@ void tetrinet_endgame (void)
         sound_playsound (S_YOUWIN);
     ingame = playing = FALSE;
     if (movedowntimeout)
-        g_source_remove (movedowntimeout);
+        sched_timer_remove (movedowntimeout);
     if (nextblocktimeout)
-        g_source_remove (nextblocktimeout);
+        sched_timer_remove (nextblocktimeout);
     movedowntimeout = nextblocktimeout = 0;
     tetris_makeblock (-1, 0);
     fields_drawnextblock (blankblock);
@@ -1574,15 +1575,15 @@ void tetrinet_updatelevels (void)
 void tetrinet_settimeout (int duration)
 {
     if (movedowntimeout)
-        g_source_remove (movedowntimeout);
-    movedowntimeout = g_timeout_add (duration, (GSourceFunc)tetrinet_timeout,
+        sched_timer_remove (movedowntimeout);
+    movedowntimeout = sched_timeout_add (duration, (sched_timer_func) tetrinet_timeout,
                                      NULL);
 }
 
 void tetrinet_removetimeout (void)
 {
     if (movedowntimeout)
-        g_source_remove (movedowntimeout);
+        sched_timer_remove (movedowntimeout);
     movedowntimeout = 0;
 }
 
@@ -1621,8 +1622,8 @@ void tetrinet_nextblock (void)
     if (nextblocktimeout) return;
     tetrinet_removetimeout ();
     nextblocktimeout =
-        g_timeout_add ((btrixgame ? 0 : NEXTBLOCKDELAY),
-                       (GSourceFunc)tetrinet_nextblocktimeout, NULL);
+        sched_timeout_add ((btrixgame ? 0 : NEXTBLOCKDELAY),
+                       (sched_timer_func) tetrinet_nextblocktimeout, NULL);
 }
 
 gint tetrinet_nextblocktimeout (void)
@@ -1696,7 +1697,7 @@ int tetrinet_removelines ()
         /* end of if */ ;
     }
     /* give it a little delay in drawing */
-    g_timeout_add (40, (GSourceFunc)tetrinet_removelinestimeout,
+    sched_timeout_add (40, (sched_timer_func) tetrinet_removelinestimeout,
                    NULL);
     return sound;
 }
@@ -1896,15 +1897,15 @@ void moderatorupdate (int now)
 {
     if (now) {
         if (mutimeout) {
-            g_source_remove (mutimeout);
+            sched_timer_remove (mutimeout);
             moderatorupdate_timeout ();
         }
     }
     else {
         if (mutimeout)
-            g_source_remove (mutimeout);
-        mutimeout = g_timeout_add (PARTYLINEDELAY2,
-                                   (GSourceFunc)moderatorupdate_timeout, NULL);
+            sched_timer_remove (mutimeout);
+        mutimeout = sched_timeout_add (PARTYLINEDELAY2,
+                                   (sched_timer_func) moderatorupdate_timeout, NULL);
     }
 }
 
@@ -1989,11 +1990,11 @@ int partylineupdate_timeout (void)
 
 void partylineupdate (int now)
 {
-    if (putimeout) g_source_remove (putimeout);
+    if (putimeout) sched_timer_remove (putimeout);
     if (now)
         partylineupdate_timeout ();
     else
-        putimeout = g_timeout_add (PARTYLINEDELAY1, (GSourceFunc)partylineupdate_timeout,
+        putimeout = sched_timeout_add (PARTYLINEDELAY1, (sched_timer_func) partylineupdate_timeout,
                                    NULL);
 }
 

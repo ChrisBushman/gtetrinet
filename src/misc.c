@@ -17,32 +17,12 @@
  *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
-#include <gtk/gtk.h>
 #include <unistd.h>
 #include <stdlib.h>
+#include <string.h>
+#include <SDL_ttf.h>
 
 #include "misc.h"
-#include "gtetrinet.h"
-#include "string.h"
-
-
-/* a left aligned label */
-GtkWidget *leftlabel_new (char *str)
-{
-    GtkWidget *label, *align;
-    label = gtk_label_new (str);
-    gtk_label_set_justify (GTK_LABEL(label), GTK_JUSTIFY_LEFT);
-    gtk_label_set_line_wrap (GTK_LABEL(label), TRUE);
-    gtk_widget_show (label);
-    align = gtk_alignment_new (0.0, 0.5, 0.0, 0.0);
-    gtk_container_add (GTK_CONTAINER(align), label);
-    return align;
-}
-
-void leftlabel_set (GtkWidget *align, char *str)
-{
-    gtk_label_set_text (GTK_LABEL(gtk_bin_get_child(GTK_BIN(align))), str);
-}
 
 /* returns a random number in the range 0 to n-1 --
  * Note both n==0 and n==1 always return 0 */
@@ -65,232 +45,105 @@ void fdreadline (int fd, char *buf)
 
 #define COLORNUM 26
 
-static struct gtet_text_tags {
- GdkColor c;
- GtkTextTag *t_c;
-} gtet_text_tags[] =
-{
-                                         /* Code + 0xE000 */
-    {{0, 0, 0, 0}, NULL},                /* ^A black */
-    {{0, 0, 0, 0}, NULL},                /* ^B black */
-    {{0, 0x0000, 0xFFFF, 0xFFFF}, NULL}, /* ^C cyan */
-    {{0, 0x0000, 0x0000, 0x0000}, NULL}, /* ^D black */
-    {{0, 0x0000, 0x0000, 0xFFFF}, NULL}, /* ^E bright blue */
-    {{0, 0x7FFF, 0x7FFF, 0x7FFF}, NULL}, /* ^F grey */
-    {{0, 0, 0, 0}, NULL},                /* ^G black */
-    {{0, 0xFFFF, 0x0000, 0xFFFF}, NULL}, /* ^H magenta */
-    {{0, 0, 0, 0}, NULL},                /* ^I black */
-    {{0, 0, 0, 0}, NULL},                /* ^J black */
-    {{0, 0x7FFF, 0x7FFF, 0x7FFF}, NULL}, /* ^K grey */
-    {{0, 0x0000, 0x7FFF, 0x0000}, NULL}, /* ^L dark green */
-    {{0, 0, 0, 0}, NULL},                /* ^M black */
-    {{0, 0x0000, 0xFFFF, 0x0000}, NULL}, /* ^N bright green */
-    {{0, 0xBFFF, 0xBFFF, 0xBFFF}, NULL}, /* ^O light grey */
-    {{0, 0x7FFF, 0x0000, 0x0000}, NULL}, /* ^P dark red */
-    {{0, 0x0000, 0x0000, 0x7FFF}, NULL}, /* ^Q dark blue */
-    {{0, 0x7FFF, 0x7FFF, 0x0000}, NULL}, /* ^R brown */
-    {{0, 0x7FFF, 0x0000, 0x7FFF}, NULL}, /* ^S purple */
-    {{0, 0xFFFF, 0x0000, 0x0000}, NULL}, /* ^T bright red */
-    {{0, 0xBFFF, 0xBFFF, 0xBFFF}, NULL}, /* ^U light grey */
-    {{0, 0, 0, 0}, NULL},                /* ^V black */
-    {{0, 0x0000, 0x7FFF, 0x7FFF}, NULL}, /* ^W dark cyan */
-    {{0, 0xFFFF, 0xFFFF, 0xFFFF}, NULL}, /* ^X white */
-    {{0, 0xFFFF, 0xFFFF, 0x0000}, NULL}, /* ^Y yellow */
-    {{0, 0, 0, 0}, NULL}                 /* ^Z black */
+/* Same 26-entry palette as the original GTK build's gtet_text_tags[],
+ * just stored as SDL_Color (8-bit) instead of GdkColor (16-bit) --
+ * values converted by >> 8, not re-picked, so this renders identically
+ * to the GTK build. Index is the raw TETRI_TB_C_* control-code value
+ * minus TETRI_TB_C_BEG_OFFSET, exactly as misc_parse_formatted() below
+ * computes it (mirroring the original textbox_addtext()). */
+static const SDL_Color gtet_colors[COLORNUM] = {
+    {0x00, 0x00, 0x00, 0xFF}, /* ^A black */
+    {0x00, 0x00, 0x00, 0xFF}, /* ^B black */
+    {0x00, 0xFF, 0xFF, 0xFF}, /* ^C cyan */
+    {0x00, 0x00, 0x00, 0xFF}, /* ^D black */
+    {0x00, 0x00, 0xFF, 0xFF}, /* ^E bright blue */
+    {0x7F, 0x7F, 0x7F, 0xFF}, /* ^F grey */
+    {0x00, 0x00, 0x00, 0xFF}, /* ^G black */
+    {0xFF, 0x00, 0xFF, 0xFF}, /* ^H magenta */
+    {0x00, 0x00, 0x00, 0xFF}, /* ^I black */
+    {0x00, 0x00, 0x00, 0xFF}, /* ^J black */
+    {0x7F, 0x7F, 0x7F, 0xFF}, /* ^K grey */
+    {0x00, 0x7F, 0x00, 0xFF}, /* ^L dark green */
+    {0x00, 0x00, 0x00, 0xFF}, /* ^M black */
+    {0x00, 0xFF, 0x00, 0xFF}, /* ^N bright green */
+    {0xBF, 0xBF, 0xBF, 0xFF}, /* ^O light grey */
+    {0x7F, 0x00, 0x00, 0xFF}, /* ^P dark red */
+    {0x00, 0x00, 0x7F, 0xFF}, /* ^Q dark blue */
+    {0x7F, 0x7F, 0x00, 0xFF}, /* ^R brown */
+    {0x7F, 0x00, 0x7F, 0xFF}, /* ^S purple */
+    {0xFF, 0x00, 0x00, 0xFF}, /* ^T bright red */
+    {0xBF, 0xBF, 0xBF, 0xFF}, /* ^U light grey */
+    {0x00, 0x00, 0x00, 0xFF}, /* ^V black */
+    {0x00, 0x7F, 0x7F, 0xFF}, /* ^W dark cyan */
+    {0xFF, 0xFF, 0xFF, 0xFF}, /* ^X white */
+    {0xFF, 0xFF, 0x00, 0xFF}, /* ^Y yellow */
+    {0x00, 0x00, 0x00, 0xFF}  /* ^Z black */
 };
 
-static GtkTextTag *t_bold = NULL;
-static GtkTextTag *t_italic = NULL;
-static GtkTextTag *t_underline = NULL;
-
-GtkTextTagTable *tag_table = NULL;
-
-void textbox_setup (void)
-{ /* API is shafted, so we need to create a buffer,
-   * to use the nice API for adding tags to tag tables ... then we destroy the
-   * buffer and keep the table for use with new buffers */
-    int n;
-    GtkTextBuffer *buffer = gtk_text_buffer_new(NULL);
-    
-    for (n = 0; n < COLORNUM; n ++)
-        gtet_text_tags[n].t_c = gtk_text_buffer_create_tag (buffer, NULL,
-                                                            "foreground-gdk",
-                                                            &gtet_text_tags[n].c,
-                                                            NULL);
-
-    t_bold = gtk_text_buffer_create_tag (buffer, NULL,
-                                         "weight", PANGO_WEIGHT_BOLD, NULL);
-    t_italic = gtk_text_buffer_create_tag (buffer, NULL,
-                                           "style", PANGO_STYLE_ITALIC, NULL);
-    t_underline = gtk_text_buffer_create_tag (buffer, NULL,
-                                              "underline", PANGO_UNDERLINE_SINGLE, NULL);
-
-    tag_table = gtk_text_buffer_get_tag_table(buffer);
-}
-
-void textbox_addtext (GtkTextView *textbox, const char *str)
+void misc_parse_formatted (const char *str, T_formattedrun_fn emit, void *userdata)
 {
-    /* At this point, str should be valid utf-8 except for some 0xFF-bytes for
-     * formatting. */
+    T_textstyle style;
+    T_textstyle laststyle; /* style to restore on a "repeat same color code" toggle-off */
+    const char *run_start;
+    unsigned char last_color_code = 0;
+    const char *p;
 
-    GtkTextTag *color, *lastcolor;
-    /* int bottom; */
-    gunichar last = 0;
-    gunichar tmp;
-    gboolean attr_bold = FALSE;
-    gboolean attr_italic = FALSE;
-    gboolean attr_underline = FALSE;
-    /* GtkAdjustment *textboxadj = GTK_TEXT_VIEW(textbox)->vadjustment; */
-    GtkTextIter iter;
-    gchar* p;
-    gchar* text=g_strdup(str);
+    style.color = gtet_colors[0];
+    style.bold = style.italic = style.underline = 0;
+    laststyle = style;
 
-                
-    /* is the scroll bar at the bottom ?? */
-    /* if ((textboxadj->value+10)>(textboxadj->upper-textboxadj->lower-textboxadj->page_size))
-       bottom = TRUE;
-       else bottom = FALSE; */
-    /* FIXME: this shouldn't be here ... GtkTextView craps itself if you adjust
-     * constantly ...
-     * plus this function is only used from one place that doesn't call
-     * adjust_bottom always anyway  */
-    
-    lastcolor = color = gtet_text_tags[0].t_c;
-    /* gtk_text_freeze (textbox); */
+    run_start = str;
 
-    gtk_text_buffer_get_end_iter(gtk_text_view_get_buffer(textbox), &iter);
-    
-    if (gtk_text_buffer_get_char_count (gtk_text_view_get_buffer(textbox))) /* not first line */
-        gtk_text_buffer_insert (gtk_text_view_get_buffer(textbox), &iter, "\n", 1);
+    for (p = str; ; p++) {
+        unsigned char c = (unsigned char) *p;
+        int is_control = (c == TETRI_TB_RESET) || (c != 0 && c <= TETRI_TB_END_OFFSET);
 
-    /* For-loop with utf-8 support. - vidar*/
-    /* XXX: Relies on g_utf8_next_char advancing by one byte on an invalid start byte,
-       which is undefined by the documentation of g_utf8_next_char. -stump */
-    for(p=text; p[0]; p=g_utf8_next_char(p)) {
-        tmp=(guchar)p[0];  /* Only for checking color codes now.*/
-        
-	if (tmp == TETRI_TB_RESET) {
-	    lastcolor = color = gtet_text_tags[0].t_c;
-            attr_bold = FALSE;
-            attr_italic = FALSE;
-            attr_underline = FALSE;
-	}
-        else if (tmp <= TETRI_TB_END_OFFSET) {
-            g_assert(TETRI_TB_END_OFFSET < 32); /* ASCII space */
-            g_assert(TETRI_TB_C_END_OFFSET <= TETRI_TB_END_OFFSET);
-          
-            switch (tmp) {
-            case TETRI_TB_BOLD:      attr_bold      = !attr_bold; break;
-            case TETRI_TB_ITALIC:    attr_italic    = !attr_italic; break;
-            case TETRI_TB_UNDERLINE: attr_underline = !attr_underline; break;
-            default: /* it is a color... */
-                if (tmp > TETRI_TB_C_END_OFFSET) break;
-                if (tmp == last) {
-                    /* restore previous color */
-                    color = lastcolor;
-                    last = 0;
-                    goto next;
-                }
-                /* save color */
-                lastcolor = color;
-                last = tmp;
-                /* get new color */
-                color = gtet_text_tags[tmp - TETRI_TB_C_BEG_OFFSET].t_c;
+        /* Flush the run accumulated so far whenever a control byte or the
+         * end of the string is reached -- a run never spans a style
+         * change, matching how textbox_addtext() issued one
+         * insert_with_tags() call per contiguous same-tag stretch. */
+        if ((is_control || c == 0) && p > run_start)
+            emit (&style, run_start, (size_t) (p - run_start), userdata);
+
+        if (c == 0)
+            break;
+
+        if (!is_control) {
+            if (p == run_start || (p > run_start && *(p - 1) != 0 && (unsigned char) *(p-1) <= TETRI_TB_END_OFFSET))
+                run_start = p; /* start of a fresh run right after a control byte */
+            continue;
+        }
+
+        /* control byte: apply it, then the run resumes at the next byte */
+        run_start = p + 1;
+
+        if (c == TETRI_TB_RESET) {
+            style.color = gtet_colors[0];
+            style.bold = style.italic = style.underline = 0;
+            laststyle = style;
+            last_color_code = 0;
+            continue;
+        }
+
+        switch (c) {
+        case TETRI_TB_BOLD:      style.bold = !style.bold; break;
+        case TETRI_TB_ITALIC:    style.italic = !style.italic; break;
+        case TETRI_TB_UNDERLINE: style.underline = !style.underline; break;
+        default:
+            if (c > TETRI_TB_C_END_OFFSET)
+                break; /* not a recognized code -- ignore, matching the original */
+            if (c == last_color_code) {
+                /* toggle off: restore the color that was active before
+                 * this color code was applied */
+                style.color = laststyle.color;
+                last_color_code = 0;
+            } else {
+                laststyle.color = style.color;
+                last_color_code = c;
+                style.color = gtet_colors[c - TETRI_TB_C_BEG_OFFSET];
             }
         }
-        else
-        {
-          tmp=g_utf8_get_char(p); /* It's not a color code, so get the entire char. */
-          /* gchar *out = g_locale_to_utf8 (&text[i], 1, NULL, NULL, NULL);  */
-          gchar out[7]; /* max utf-8 length plus \0 */
-          out[g_unichar_to_utf8(tmp,out)]='\0'; /* convert and terminate */
-          g_assert(g_utf8_validate(out,-1,NULL));
-          
-            if (0)
-            { /* do nothing */ ; }
-            else if (attr_bold && attr_italic && attr_underline)
-              gtk_text_buffer_insert_with_tags (gtk_text_view_get_buffer(textbox), &iter, out, -1,
-                                                t_bold, t_italic, t_underline,
-                                                color, NULL);
-            else if (attr_bold && attr_italic)
-              gtk_text_buffer_insert_with_tags (gtk_text_view_get_buffer(textbox), &iter, out, -1,
-                                                t_bold, t_italic,
-                                                color, NULL);
-            else if (attr_bold && attr_underline)
-              gtk_text_buffer_insert_with_tags (gtk_text_view_get_buffer(textbox), &iter, out, -1,
-                                                t_bold, t_underline,
-                                                color, NULL);
-            else if (attr_italic && attr_underline)
-              gtk_text_buffer_insert_with_tags (gtk_text_view_get_buffer(textbox), &iter, out, -1,
-                                                t_italic, t_underline,
-                                                color, NULL);
-            else if (attr_bold || attr_italic || attr_underline)
-            {
-              GtkTextTag *t_a = NULL;
-
-              if (attr_bold)      t_a = t_bold;
-              if (attr_italic)    t_a = t_italic;
-              if (attr_underline) t_a = t_underline;
-              
-              gtk_text_buffer_insert_with_tags (gtk_text_view_get_buffer(textbox), &iter, out, -1,
-                                                t_a, color, NULL);
-            }
-            else if (color != lastcolor)
-              gtk_text_buffer_insert_with_tags (gtk_text_view_get_buffer(textbox), &iter, out, -1,
-                                                color, NULL);
-            else
-              gtk_text_buffer_insert (gtk_text_view_get_buffer(textbox), &iter, out, -1);
-            
-        }
-        
-    next:
-        continue;
     }
-    /* scroll to bottom */
-    /* gtk_text_thaw (textbox); */
-    /* if (bottom) adjust_bottom (textboxadj); */
-
-    g_free(text);
-}
-
-/* have to use an idle handler for the adjustment ... or the TextView goes
- * syncronous ... and has bugs.
- * There might be a better way to do a one shot idle handler.
- * This works though */
-static GList *adj_list = NULL;
-
-static gboolean cb_adjust_bottom(gpointer data)
-{
-  GList *scan = adj_list;
-
-  data = data; /* to get rid of the warning */
-  
-  while (scan)
-  {
-    GtkTextView *tv = scan->data;
-    GtkTextIter iter;
-
-    gtk_text_buffer_get_end_iter(gtk_text_view_get_buffer(tv), &iter);
-    /* Maybe want... scroll_to_iter(tv, &iter, 0.0, TRUE, 0.0, 1.0); ???? */
-    gtk_text_view_scroll_to_iter(tv, &iter, 0.0, FALSE, 0.0, 0.0);
-    
-    scan = scan->next;
-  }
-  
-  g_list_free(adj_list);
-  adj_list = NULL;
-  return FALSE;
-}
-
-void adjust_bottom_text_view (GtkTextView *tv)
-{
-  if (!g_list_find(adj_list, tv))
-  {
-    if (!adj_list)
-      g_idle_add (cb_adjust_bottom, adj_list);
-    
-    adj_list = g_list_append(adj_list, tv);
-  }
 }
 
 char *nocolor (char *str)
@@ -298,7 +151,7 @@ char *nocolor (char *str)
   static GString *ret = NULL;
   size_t len = strlen(str);
   signed char *scan, *p = NULL;
-  
+
   if (!ret)
     ret = g_string_new("");
 
@@ -312,7 +165,7 @@ char *nocolor (char *str)
   }
   if (scan != p)
     g_string_truncate(ret, len - (scan - p));
-  
+
   return ret->str;
 }
 
@@ -322,17 +175,92 @@ gchar* ensure_utf8(const char* str) {
 
     if(g_utf8_validate(str,-1,NULL)) {
         /* The string is valid utf-8, copy it. */
-        text=g_strdup(str); 
+        text=g_strdup(str);
     } else {
         /* The string isn't valid utf-8, try locale. */
         text=g_locale_to_utf8(str,-1,NULL,NULL,NULL);
         if(!text) { /* The locale didn't work. Use ISO8859-1. */
             text=g_convert(str,-1,"UTF-8","ISO8859-1",NULL,NULL,NULL);
         }
-    } 
+    }
     /* Any random byte sequence is valid iso8859-1, so this won't happen.*/
     g_assert(text!=NULL && g_utf8_validate(text,-1,NULL));
     return text;
 }
 
+/* --- SDL_ttf-based rendering: replaces textbox_setup/textbox_addtext/
+   adjust_bottom_text_view and the GtkTextTag machinery entirely. A
+   single loaded font face is reused for every style combination via
+   TTF_SetFontStyle (bold/italic/underline are all supported as
+   synthesized style bits on one face -- no separate bold/italic font
+   files needed). */
 
+static TTF_Font *font = NULL;
+
+int misc_font_init (const char *font_path, int size_px)
+{
+    if (TTF_Init () != 0)
+        return -1;
+    font = TTF_OpenFont (font_path, size_px);
+    return font ? 0 : -1;
+}
+
+void misc_font_cleanup (void)
+{
+    if (font) {
+        TTF_CloseFont (font);
+        font = NULL;
+    }
+    TTF_Quit ();
+}
+
+int misc_font_line_height (void)
+{
+    return font ? TTF_FontLineSkip (font) : 0;
+}
+
+int misc_font_render (SDL_Surface *dst, int x, int y, const T_textstyle *style, const char *text, size_t len)
+{
+    char stackbuf[256];
+    char *buf = stackbuf;
+    SDL_Surface *rendered;
+    SDL_Rect dstrect;
+    int width;
+    int stylebits;
+
+    if (font == NULL || len == 0)
+        return 0;
+
+    /* T_formattedrun_fn hands us a non-nul-terminated substring -- copy
+     * it out to a nul-terminated buffer for TTF_RenderUTF8_Blended,
+     * falling back to malloc for the rare run longer than stackbuf. */
+    if (len >= sizeof (stackbuf)) {
+        buf = malloc (len + 1);
+        if (!buf)
+            return 0;
+    }
+    memcpy (buf, text, len);
+    buf[len] = 0;
+
+    stylebits = TTF_STYLE_NORMAL;
+    if (style->bold)      stylebits |= TTF_STYLE_BOLD;
+    if (style->italic)    stylebits |= TTF_STYLE_ITALIC;
+    if (style->underline) stylebits |= TTF_STYLE_UNDERLINE;
+    TTF_SetFontStyle (font, stylebits);
+
+    rendered = TTF_RenderUTF8_Blended (font, buf, style->color);
+    if (buf != stackbuf)
+        free (buf);
+    if (rendered == NULL)
+        return 0;
+
+    dstrect.x = x;
+    dstrect.y = y;
+    dstrect.w = rendered->w;
+    dstrect.h = rendered->h;
+    SDL_BlitSurface (rendered, NULL, dst, &dstrect);
+    width = rendered->w;
+    SDL_FreeSurface (rendered);
+
+    return width;
+}
