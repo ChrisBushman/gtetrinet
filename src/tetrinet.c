@@ -22,10 +22,6 @@
 #include <config.h>
 #endif
 
-/* gtk.h is only still needed here for the one remaining
- * gtk_message_dialog_new() call (a connection-error dialog) --
- * dialogs.c (not yet ported) will own a portable equivalent later. */
-#include <gtk/gtk.h>
 #include <glib/gi18n.h>
 #include <stdlib.h>
 #include <string.h>
@@ -227,18 +223,17 @@ void tetrinet_inmessage (enum inmsg_type msgtype, char *data)
     case IN_CONNECTERROR:
     connecterror:
         {
-            GtkWidget *dialog;
             gchar *data_utf8;
             connectingdialog_destroy ();
             GTET_O_STRCPY (buf, _("Error connecting: "));
             data_utf8 = g_locale_to_utf8 (data, -1, NULL, NULL, NULL);
             GTET_O_STRCAT (buf, data_utf8);
-            dialog = gtk_message_dialog_new (NULL, GTK_DIALOG_MODAL,
-                                             GTK_MESSAGE_ERROR,
-                                             GTK_BUTTONS_OK,
-                                             "%s", buf);
-            gtk_dialog_run (GTK_DIALOG(dialog));
-            gtk_widget_destroy (dialog);
+            /* No modal error dialog anymore -- surfaced in the
+               partyline log instead, which (unlike a one-shot dialog)
+               is always visible regardless of what's currently on
+               screen, same channel already used for the "Disconnected
+               from server" message just above. */
+            partyline_fmt ("%c%c*** %s", TETRI_TB_C_DARK_GREEN, TETRI_TB_BOLD, buf);
             g_free (data_utf8);
             show_connect_button ();
         }

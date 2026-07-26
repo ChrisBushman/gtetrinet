@@ -1,4 +1,3 @@
-
 /*
  *  GTetrinet
  *  Copyright (C) 1999, 2000, 2001, 2002, 2003  Ka-shu Wong (kswong@zip.com.au)
@@ -18,19 +17,13 @@
  *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
-#ifdef HAVE_CONFIG_H
-#include <config.h>
-#endif
-
-#include <libintl.h>
-#include <gtk/gtk.h>
+#include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <time.h>
-#include <sys/poll.h>
-#include <sys/types.h>
-#include <gobject/gtype.h>
-#include <signal.h>
-#include <popt.h>
+#include <glib.h>
+#include <SDL.h>
+#include <SDL_image.h>
 
 #include "gtetrinet.h"
 #include "gtet_config.h"
@@ -43,520 +36,551 @@
 #include "misc.h"
 #include "commands.h"
 #include "sound.h"
-#include "string.h"
-
-#include "images/fields.xpm"
-#include "images/partyline.xpm"
-#include "images/winlist.xpm"
-
-static GtkWidget *pixmapdata_label (char **d, char *str);
-static int gtetrinet_key (int keyval, int mod);
-gint keypress (GtkWidget *widget, GdkEventKey *key);
-gint keyrelease (GtkWidget *widget, GdkEventKey *key);
-void switch_focus (GtkNotebook *notebook,
-                   void *page,
-                   guint page_num);
-
-static GtkWidget *pfields, *pparty, *pwinlist;
-static GtkWidget *winlistwidget, *partywidget, *fieldswidget;
-static GtkWidget *notebook;
-
-GtkWidget *app;
-
-char *option_connect = 0, *option_nick = 0, *option_team = 0, *option_pass = 0;
-int option_spec = 0;
+#include "dialogs.h"
+#include "sched.h"
 
 int gamemode = ORIGINAL;
 
-int fields_width, fields_height;
+typedef enum {
+    PAGE_FIELDS,
+    PAGE_PARTYLINE,
+    PAGE_WINLIST,
+    PAGE_COUNT
+} T_page;
 
-gulong keypress_signal;
+static const char *page_names[PAGE_COUNT] = { "Playing Fields", "Partyline", "Winlist" };
 
-GSettings* settings;
-GSettings* settings_keys;
-GSettings* settings_themes;
+static int running = 1;
+static T_page current_page = PAGE_FIELDS;
 
-static const struct poptOption options[] = {
-    {"connect", 'c', POPT_ARG_STRING, &option_connect, 0, ("Connect to server"), ("SERVER")},
-    {"nickname", 'n', POPT_ARG_STRING, &option_nick, 0, ("Set nickname to use"), ("NICKNAME")},
-    {"team", 't', POPT_ARG_STRING, &option_team, 0, ("Set team name"), ("TEAM")},
-    {"spectate", 's', POPT_ARG_NONE, &option_spec, 0, ("Connect as a spectator"), NULL},
-    {"password", 'p', POPT_ARG_STRING, &option_pass, 0, ("Spectator password"), ("PASSWORD")},
-    {NULL, 0, 0, NULL, 0, NULL, NULL}
-};
-
-static int gtetrinet_poll_func(GPollFD *passed_fds,
-                               guint nfds,
-                               int timeout)
-{ /* passing a timeout wastes time, even if data is ready... don't do that */
-  int ret = 0;
-  struct pollfd *fds = (struct pollfd *)passed_fds;
-
-  ret = poll(fds, nfds, 0);
-  if (!ret && timeout)
-    ret = poll(fds, nfds, timeout);
-
-  return (ret);
-}
-
-/*
- * based on https://developer.gnome.org/gio/stable/gio-GSettingsSchema-GSettingsSchemaSource.html
- * I have no idea why this is not the default behavior
- */
-GSettings *get_schema_settings(const gchar *schema_id)
-{
-  GSettingsSchema *schema;
-  GSettingsSchemaSource *schema_source;
-  GError **error = NULL;
-  schema_source = g_settings_schema_source_new_from_directory(GSETTINGSSCHEMADIR, g_settings_schema_source_get_default(), FALSE, error);
-  schema = g_settings_schema_source_lookup(schema_source, schema_id, FALSE);
-  if (schema == NULL)
-  {
-    return g_settings_new(schema_id);
-  }
-  return g_settings_new_full(schema, NULL, NULL);
-}
-
-int main (int argc, char *argv[])
-{
-    GtkWidget *label;
-    GdkPixbuf *icon_pixbuf;
-    GError *err = NULL;
-    
-    bindtextdomain(PACKAGE, LOCALEDIR);
-    bind_textdomain_codeset(PACKAGE, "UTF-8");
-    textdomain(PACKAGE);
-
-    srand (time(NULL));
-
-    /*
-    gnome_program_init (APPID, APPVERSION, LIBGNOMEUI_MODULE,
-                        argc, argv, GNOME_PARAM_POPT_TABLE, options,
-                        GNOME_PARAM_NONE);
-    */
-    GOptionEntry options[] = { {NULL}};
-    if (!gtk_init_with_args(&argc,&argv,"gtetrinet",options,NULL,&err))
-    {
-        fprintf (stderr, "Failed to init GTK: %s\n", err->message);
-        g_error_free(err);
-        err = NULL;
-        return 1;
-    }
-    textbox_setup (); /* needs to be done before text boxes are created */
-
-    // First, try to get settings from compiled schema directory (as we can properly check these), then try generic system directories chosen by gsettings library
-    settings = get_schema_settings (GSETTINGS_DOMAIN);
-    settings_keys = get_schema_settings (GSETTINGS_DOMAIN_KEYS);
-    settings_themes = get_schema_settings (GSETTINGS_DOMAIN_THEMES);
-
-    g_signal_connect_swapped (settings, "changed", G_CALLBACK(config_loadconfig), NULL);
-    g_signal_connect_swapped (settings_keys, "changed", G_CALLBACK(config_loadconfig_keys), NULL);
-    g_signal_connect_swapped (settings_themes, "changed", G_CALLBACK(config_loadconfig_themes), NULL);
-
-    /* load settings */
-    config_loadconfig ();
-    config_loadconfig_keys ();
-
-    /* first set up the display */
-
-    /* create the main window */
-    app = gtk_window_new (GTK_WINDOW_TOPLEVEL);
-    gtk_window_set_title (GTK_WINDOW (app), APPNAME);
-
-    g_signal_connect (G_OBJECT(app), "destroy",
-                        G_CALLBACK(destroymain), NULL);
-    keypress_signal = g_signal_connect (G_OBJECT(app), "key-press-event",
-                                        G_CALLBACK(keypress), NULL);
-    g_signal_connect (G_OBJECT(app), "key-release-event",
-                        G_CALLBACK(keyrelease), NULL);
-    gtk_widget_set_events (app, GDK_KEY_PRESS_MASK | GDK_KEY_RELEASE_MASK);
-
-    gtk_window_set_resizable (GTK_WINDOW (app), TRUE);
-    
-    /* create and set the window icon */
-    icon_pixbuf = gdk_pixbuf_new_from_file (PIXMAPSDIR "/gtetrinet.png", NULL);
-    if (icon_pixbuf)
-    {
-      gtk_window_set_icon (GTK_WINDOW (app), icon_pixbuf);
-      g_object_unref (icon_pixbuf);
-    }
-
-    /* create the notebook */
-    notebook = gtk_notebook_new ();
-    gtk_notebook_set_tab_pos (GTK_NOTEBOOK(notebook), GTK_POS_TOP);
-
-    /* put it in the main window */
-    gtk_container_add (GTK_CONTAINER(app), notebook);
-
-    /* make menus + toolbar */
-    make_menus (GTK_WINDOW(app));
-
-    /* create the pages in the notebook */
-    fieldswidget = fields_page_new ();
-    gtk_widget_set_sensitive (fieldswidget, TRUE);
-    gtk_widget_show (fieldswidget);
-    pfields = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 0);
-    gtk_container_set_border_width (GTK_CONTAINER(pfields), 0);
-    gtk_container_add (GTK_CONTAINER(pfields), fieldswidget);
-    gtk_widget_show (pfields);
-    g_object_set_data (G_OBJECT(fieldswidget), "title", "Playing Fields"); // FIXME
-    label = pixmapdata_label (fields_xpm, "Playing Fields");
-    gtk_widget_show (label);
-    gtk_notebook_append_page (GTK_NOTEBOOK(notebook), pfields, label);
-
-    partywidget = partyline_page_new ();
-    gtk_widget_show (partywidget);
-    pparty = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 0);
-    gtk_container_set_border_width (GTK_CONTAINER(pparty), 0);
-    gtk_container_add (GTK_CONTAINER(pparty), partywidget);
-    gtk_widget_show (pparty);
-    g_object_set_data (G_OBJECT(partywidget), "title", "Partyline"); // FIXME
-    label = pixmapdata_label (partyline_xpm, "Partyline");
-    gtk_widget_show (label);
-    gtk_notebook_append_page (GTK_NOTEBOOK(notebook), pparty, label);
-
-    winlistwidget = winlist_page_new ();
-    gtk_widget_show (winlistwidget);
-    pwinlist = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 0);
-    gtk_container_set_border_width (GTK_CONTAINER(pwinlist), 0);
-    gtk_container_add (GTK_CONTAINER(pwinlist), winlistwidget);
-    gtk_widget_show (pwinlist);
-    g_object_set_data (G_OBJECT(winlistwidget), "title", "Winlist"); // FIXME
-    label = pixmapdata_label (winlist_xpm, "Winlist");
-    gtk_widget_show (label);
-    gtk_notebook_append_page (GTK_NOTEBOOK(notebook), pwinlist, label);
-
-    /* add signal to focus the text entry when switching to the partyline page*/
-    g_signal_connect_after(G_OBJECT (notebook), "switch-page",
-		           G_CALLBACK (switch_focus),
-		           NULL);
-
-    gtk_widget_show (notebook);
-    g_object_set (G_OBJECT (notebook), "can-focus", FALSE, NULL);
-
-    partyline_show_channel_list (list_enabled);
-    gtk_widget_show (app);
-
-//    gtk_widget_set_size_request (partywidget, 480, 360);
-//    gtk_widget_set_size_request (winlistwidget, 480, 360);
-
-    /* initialise some stuff */
-    config_loadconfig_themes ();
-    commands_checkstate ();
-
-    /* check command line params */
-#ifdef DEBUG
-    printf ("option_connect: %s\n"
-            "option_nick: %s\n"
-            "option_team: %s\n"
-            "option_pass: %s\n"
-            "option_spec: %i\n",
-            option_connect, option_nick, option_team,
-            option_pass, option_spec);
+#if SDL_MAJOR_VERSION >= 2
+static SDL_Window *window;
 #endif
-    if (option_nick) GTET_O_STRCPY(nick, option_nick);
-    if (option_team) GTET_O_STRCPY(team, option_team);
-    if (option_pass) GTET_O_STRCPY(specpassword, option_pass);
-    if (option_spec) spectating = TRUE;
-    if (option_connect) {
-        client_init (option_connect, nick);
-    }
+static SDL_Surface *screen;
+static SDL_Surface *fields_canvas;
 
-    /* Don't schedule if data is ready, glib should do this itself,
-     * but welcome to anything that works... */
-    g_main_context_set_poll_func(NULL, gtetrinet_poll_func);
+static int win_w, win_h;
+static SDL_Rect menubar_rect, tabbar_rect, content_rect;
 
-    /* gtk_main() */
-    gtk_main ();
+#define MAX_MENU_RECTS 16
+static SDL_Rect menu_rects[MAX_MENU_RECTS];
+static T_command_id menu_rect_ids[MAX_MENU_RECTS];
+static int menu_rect_count;
 
-    g_object_unref (settings);
-    g_object_unref (settings_keys);
-    g_object_unref (settings_themes);
+static SDL_Rect tab_rects[PAGE_COUNT];
 
-    client_disconnect ();
-    /* cleanup */
-    fields_cleanup ();
+/* --- video (SDL 1.2 / SDL2 compatibility) ---------------------------
+ * Every other file in this port draws onto a plain SDL_Surface (never
+ * a Renderer/Texture) specifically so this is the only place that
+ * needs to know which SDL major version it's built against -- SDL2's
+ * SDL_GetWindowSurface() gives back the same kind of legacy software
+ * surface SDL 1.2's SDL_SetVideoMode() always returned. */
 
+static int
+video_init (int w, int h)
+{
+#if SDL_MAJOR_VERSION >= 2
+    window = SDL_CreateWindow (APPNAME, SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
+                                w, h, 0);
+    if (!window)
+        return -1;
+    screen = SDL_GetWindowSurface (window);
+    return screen ? 0 : -1;
+#else
+    screen = SDL_SetVideoMode (w, h, 32, SDL_SWSURFACE);
+    if (!screen)
+        return -1;
+    SDL_WM_SetCaption (APPNAME, APPNAME);
     return 0;
+#endif
 }
 
-GtkWidget *pixmapdata_label (char **d, char *str)
+static void
+video_flip (void)
 {
-    GdkPixbuf *pb;
-    GtkWidget *box, *widget;
+#if SDL_MAJOR_VERSION >= 2
+    SDL_UpdateWindowSurface (window);
+#else
+    SDL_Flip (screen);
+#endif
+}
 
-    box = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 0);
+static void
+set_window_icon (void)
+{
+    SDL_Surface *icon = IMG_Load (GTETPIXMAPSDIR "/gtetrinet.png");
+    if (!icon)
+        return;
+#if SDL_MAJOR_VERSION >= 2
+    SDL_SetWindowIcon (window, icon);
+#else
+    SDL_WM_SetIcon (icon, NULL);
+#endif
+    SDL_FreeSurface (icon);
+}
 
-    pb = gdk_pixbuf_new_from_xpm_data ((const char **)d);
-    widget = gtk_image_new_from_pixbuf (pb);
-    gtk_widget_show (widget);
-    gtk_box_pack_start (GTK_BOX(box), widget, TRUE, TRUE, 0);
-  
-    widget = gtk_label_new (str);
-    gtk_widget_show (widget);
-    gtk_box_pack_start (GTK_BOX(box), widget, TRUE, TRUE, 0);
+/* --- game-message input submit --------------------------------------
+ * Replaces gmsginput_activate(), previously wired to GtkEntry's
+ * "activate" signal (Enter). fields.c owns the input buffer itself
+ * (fields_gmsginputtext()/fields_gmsginputclear()); the *decision* of
+ * what to do with a submitted line was always app-level logic, not
+ * something that belonged inside fields.c. */
 
-    return box;
+static void
+gmsg_submit (void)
+{
+    char buf[512];
+    const char *s = fields_gmsginputtext ();
+
+    if (strlen (s) > 0) {
+        if (strncmp ("/me ", s, 4) == 0)
+            g_snprintf (buf, sizeof (buf), "* %s %s", nick, s + 4);
+        else
+            g_snprintf (buf, sizeof (buf), "<%s> %s", nick, s);
+        client_outmessage (OUT_GMSG, buf);
+    }
+    fields_gmsginputclear ();
+    fields_gmsginput (0);
+    gmsgstate = 0;
+}
+
+/* --- page switching ---------------------------------------------------
+ * switch_page(PAGE_FIELDS) refocusing the *partyline* entry when not in
+ * gmsg mode looks odd, but it faithfully matches the original
+ * switch_focus()'s case 0 -- not a typo introduced by this port. */
+
+static void
+switch_page (T_page page)
+{
+    current_page = page;
+    if (!connected)
+        return;
+    switch (page) {
+    case PAGE_FIELDS:
+        if (gmsgstate) fields_gmsginputactivate (1);
+        else partyline_entryfocus ();
+        break;
+    case PAGE_PARTYLINE:
+        partyline_entryfocus ();
+        break;
+    case PAGE_WINLIST:
+        winlist_focus ();
+        break;
+    default:
+        break;
+    }
 }
 
 /* called when the main window is destroyed */
-void destroymain (void)
+void
+destroymain (void)
 {
-    gtk_main_quit ();
+    running = 0;
 }
 
-/*
- The key press/release handlers requires a little hack:
- There is no indication whether each keypress/release is a real press
- or a real release, or whether it is just typematic action.
- However, if it is a result of typematic action, the keyrelease and the
- following keypress event have the same value in the time field of the
- GdkEventKey struct.
- The solution is: when a keyrelease event is received, the event is stored
- and a timeout handler is installed.  if a subsequent keypress event is
- received with the same value in the time field, the keyrelease event is
- discarded.  The keyrelease event is sent if the timeout is reached without
- being cancelled.
- This results in slightly slower responses for key releases, but it should not
- be a big problem.
- */
-
-GdkEventKey k;
-gint keytimeoutid = 0;
-
-gint keytimeout (gpointer data)
+void
+show_fields_page (void)
 {
-    tetrinet_upkey (k.keyval);
-    keytimeoutid = 0;
-    return FALSE;
+    switch_page (PAGE_FIELDS);
 }
 
-gint keypress (GtkWidget *widget, GdkEventKey *key)
+void
+show_partyline_page (void)
 {
-    int game_area;
-
-    if (widget == app)
-    {
-      int cur_page = gtk_notebook_get_current_page(GTK_NOTEBOOK(notebook));
-      int pfields_page = gtk_notebook_page_num(GTK_NOTEBOOK(notebook),
-                                               pfields);
-      /* Main window - check the notebook */
-      game_area = (cur_page == pfields_page);
-    }
-    else
-    {
-        /* Sub-window - find out which */
-        char *title = NULL;
-
-        title = g_object_get_data(G_OBJECT(widget), "title");
-        game_area =  title && !strcmp( title, "Playing Fields");
-    }
-
-    if (game_area)
-    { /* keys for the playing field - key releases needed - install timeout */
-      if (keytimeoutid && key->time == k.time)
-        g_source_remove (keytimeoutid);
-    }
-
-    /* Check if it's a GTetrinet key */
-    if (gtetrinet_key (key->keyval, key->state & (GDK_MOD1_MASK)))
-    {
-      g_signal_stop_emission_by_name (G_OBJECT(widget), "key-press-event");
-      return TRUE;
-    }
-
-/*    if ((key->state & (GDK_MOD1_MASK | GDK_CONTROL_MASK)) > 0)
-    return FALSE;*/
-    
-    if (game_area && ingame && (gdk_keyval_to_lower (key->keyval) == keys[K_GAMEMSG]))
-    {
-      g_signal_handler_block (app, keypress_signal);
-      fields_gmsginputactivate (TRUE);
-      g_signal_stop_emission_by_name (G_OBJECT(widget), "key-press-event");
-    }
-
-    if (game_area && tetrinet_key (key->keyval))
-    {
-      g_signal_stop_emission_by_name (G_OBJECT(widget), "key-press-event");
-      return TRUE;
-    }
-    
-    return FALSE;
+    switch_page (PAGE_PARTYLINE);
 }
 
-gint keyrelease (GtkWidget *widget, GdkEventKey *key)
+/* SDL has no GTK-style signal-blocking to undo; gmsgstate itself is
+   already what routes keys away from the game while typing a message,
+   so there's nothing left for this to do. Kept only because tetrinet.c
+   still calls it (see gtet_config.h-era forward-declare comments
+   elsewhere in the port for why call sites weren't all touched). */
+void
+unblock_keyboard_signal (void)
 {
-    int game_area;
-
-    if (widget == app)
-    {
-      int cur_page = gtk_notebook_get_current_page(GTK_NOTEBOOK(notebook));
-      int pfields_page = gtk_notebook_page_num(GTK_NOTEBOOK(notebook),
-                                               pfields);
-      /* Main window - check the notebook */
-      game_area = (cur_page == pfields_page);
-    }
-    else
-    {
-        /* Sub-window - find out which */
-        char *title = NULL;
-
-        title = g_object_get_data(G_OBJECT(widget), "title");
-        game_area =  title && !strcmp( title, "Playing Fields");
-    }
-
-    if (game_area)
-    {
-        k = *key;
-        keytimeoutid = g_timeout_add (10, keytimeout, 0);
-        g_signal_stop_emission_by_name (G_OBJECT(widget), "key-release-event");
-        return TRUE;
-    }
-    return FALSE;
 }
 
-/*
- TODO: make this switch between detached pages too
- */
-static int gtetrinet_key (int keyval, int mod)
+/* --- layout: menu bar / tab bar / content area ---------------------- */
+
+static void
+layout_chrome (void)
 {
-  if (mod != GDK_MOD1_MASK)
-    return FALSE;
-    
-  switch (keyval)
-  {
-  case GDK_KEY_1: gtk_notebook_set_current_page (GTK_NOTEBOOK(notebook), 0); break;
-  case GDK_KEY_2: gtk_notebook_set_current_page (GTK_NOTEBOOK(notebook), 1); break;
-  case GDK_KEY_3: gtk_notebook_set_current_page (GTK_NOTEBOOK(notebook), 2); break;
-  default:
-    return FALSE;
-  }
-  return TRUE;
+    int line_h = misc_font_line_height ();
+
+    menubar_rect.x = 0;
+    menubar_rect.y = 0;
+    menubar_rect.w = win_w;
+    menubar_rect.h = line_h + 14;
+
+    tabbar_rect.x = 0;
+    tabbar_rect.y = menubar_rect.h;
+    tabbar_rect.w = win_w;
+    tabbar_rect.h = line_h + 10;
+
+    content_rect.x = 0;
+    content_rect.y = menubar_rect.h + tabbar_rect.h;
+    content_rect.w = win_w;
+    content_rect.h = win_h - content_rect.y;
 }
 
-/* funky page detach stuff */
-
-/* Type to hold primary widget and its label in the notebook page */
-typedef struct {
-    GtkWidget *parent;
-    GtkWidget *widget;
-    int pageNo;
-} WidgetPageData;
-
-void destroy_page_window (GtkWidget *window, gpointer data)
+static void
+render_menubar (SDL_Surface *dst)
 {
-    WidgetPageData *pageData = (WidgetPageData *)data;
+    T_textstyle style;
+    int line_h = misc_font_line_height ();
+    int x = 4, y = 4;
+    int i;
 
-    /* Put widget back into a page */
-    //gtk_widget_reparent (pageData->widget, pageData->parent);
-    g_object_ref (pageData->parent);
-    gtk_container_remove(GTK_CONTAINER (gtk_widget_get_parent (pageData->widget)), pageData->widget);
-    gtk_container_add(GTK_CONTAINER (pageData->parent), pageData->widget);
-    g_object_unref (pageData->parent);
+    style.color.r = style.color.g = style.color.b = 0xFF;
+    style.color.a = 0xFF;
+    style.bold = style.italic = style.underline = 0;
 
-    /* Select it */
-    gtk_notebook_set_current_page (GTK_NOTEBOOK(notebook), pageData->pageNo);
+    SDL_FillRect (dst, &menubar_rect, SDL_MapRGB (dst->format, 24, 24, 24));
 
-    /* Free return data */
-    g_free (data);
+    menu_rect_count = 0;
+    for (i = 0; i < commands_menu_count () && menu_rect_count < MAX_MENU_RECTS; i++) {
+        const T_menuitem *item = commands_menu_item (i);
+        SDL_Rect r;
+        int tw;
+
+        if (!item->visible)
+            continue;
+
+        /* No text-width-measurement API exists yet (see misc.h) -- this
+           is a rough monospace-ish estimate, a known simplification
+           like the ones already documented in fields.c/partyline.c. */
+        tw = (int) strlen (item->label) * 8 + 16;
+        r.x = x; r.y = y; r.w = tw; r.h = line_h + 6;
+
+        SDL_FillRect (dst, &r, SDL_MapRGB (dst->format, item->enabled ? 55 : 35,
+                                           item->enabled ? 55 : 35, item->enabled ? 55 : 35));
+        misc_font_render (dst, r.x + 6, r.y + 3, &style, item->label, strlen (item->label));
+
+        menu_rects[menu_rect_count] = r;
+        menu_rect_ids[menu_rect_count] = item->id;
+        menu_rect_count++;
+
+        x += tw + 4;
+    }
 }
 
-void move_current_page_to_window (void)
+static void
+render_tabbar (SDL_Surface *dst)
 {
-    WidgetPageData *pageData;
-    GtkWidget *page, *child, *newWindow;
-    GList *dlist;
-    gint pageNo;
-    char *title;
+    T_textstyle style;
+    int tab_w = win_w / PAGE_COUNT;
+    int i;
 
-    /* Extract current page's widget & it's parent from the notebook */
-    pageNo = gtk_notebook_get_current_page (GTK_NOTEBOOK(notebook));
-    page   = gtk_notebook_get_nth_page (GTK_NOTEBOOK(notebook), pageNo );
-    dlist  = gtk_container_get_children (GTK_CONTAINER(page));
-    if (!dlist ||  !(dlist->data))
-    {
-        /* Must already be a window */
-        if (dlist)
-           g_list_free (dlist);
+    style.color.r = style.color.g = style.color.b = 0xFF;
+    style.color.a = 0xFF;
+    style.bold = style.italic = style.underline = 0;
+
+    for (i = 0; i < PAGE_COUNT; i++) {
+        SDL_Rect r;
+        int active = ((int) current_page == i);
+
+        r.x = i * tab_w;
+        r.y = tabbar_rect.y;
+        r.w = (i == PAGE_COUNT - 1) ? (win_w - r.x) : tab_w;
+        r.h = tabbar_rect.h;
+
+        SDL_FillRect (dst, &r, SDL_MapRGB (dst->format, active ? 45 : 28, active ? 45 : 28, active ? 45 : 28));
+        style.bold = active;
+        misc_font_render (dst, r.x + 6, r.y + 3, &style, page_names[i], strlen (page_names[i]));
+
+        tab_rects[i] = r;
+    }
+}
+
+static void
+ensure_fields_canvas (void)
+{
+    int w = fields_screen_width ();
+    int h = fields_screen_height ();
+
+    if (fields_canvas)
+        SDL_FreeSurface (fields_canvas);
+    fields_canvas = SDL_CreateRGBSurface (0, w, h, 32, 0, 0, 0, 0);
+}
+
+static void
+render_frame (void)
+{
+    SDL_FillRect (screen, NULL, SDL_MapRGB (screen->format, 10, 10, 10));
+
+    render_menubar (screen);
+    render_tabbar (screen);
+
+    switch (current_page) {
+    case PAGE_FIELDS:
+        if (fields_canvas) {
+            SDL_Rect dst_pos = { content_rect.x, content_rect.y, 0, 0 };
+            SDL_FillRect (fields_canvas, NULL, SDL_MapRGB (fields_canvas->format, 10, 10, 10));
+            fields_render (fields_canvas);
+            SDL_BlitSurface (fields_canvas, NULL, screen, &dst_pos);
+        }
+        break;
+    case PAGE_PARTYLINE:
+        partyline_render (screen, &content_rect);
+        break;
+    case PAGE_WINLIST:
+        winlist_render (screen, &content_rect);
+        break;
+    default:
+        break;
+    }
+
+    if (dialog_is_open ()) {
+        SDL_Rect full = { 0, 0, win_w, win_h };
+        dialog_render (screen, &full);
+    }
+
+    video_flip ();
+}
+
+/* --- input routing ---------------------------------------------------
+ * Priority, topmost first: an open dialog always wins; otherwise Alt+
+ * 1/2/3 page-switch (matching the original's GDK_MOD1_MASK check in
+ * gtetrinet_key()); otherwise whichever page is active. Backspace is
+ * routed to each module's dedicated backspace entry point rather than
+ * through its keydown handler, matching the convention already
+ * established by fields.c/partyline.c/dialogs.c's own headers. */
+
+static void
+route_click (int x, int y)
+{
+    int i;
+
+    if (dialog_is_open ()) {
+        dialog_click (x, y);
         return;
     }
-    child = (GtkWidget *)dlist->data;
-    g_list_free (dlist);
 
-    /* Create new window for widget, plus container, etc. */
-    newWindow = gtk_window_new (GTK_WINDOW_TOPLEVEL);
-    title = g_object_get_data (G_OBJECT(child), "title");
-    if (!title)
-        title = "GTetrinet";
-    gtk_window_set_title (GTK_WINDOW (newWindow), title);
-    gtk_container_set_border_width (GTK_CONTAINER (newWindow), 0);
+    for (i = 0; i < menu_rect_count; i++)
+        if (x >= menu_rects[i].x && x < menu_rects[i].x + menu_rects[i].w &&
+            y >= menu_rects[i].y && y < menu_rects[i].y + menu_rects[i].h) {
+            commands_activate (menu_rect_ids[i]);
+            return;
+        }
 
-    /* Attach key events to window */
-    g_signal_connect (G_OBJECT(newWindow), "key-press-event",
-                        G_CALLBACK(keypress), NULL);
-    g_signal_connect (G_OBJECT(newWindow), "key-release-event",
-                        G_CALLBACK(keyrelease), NULL);
-    gtk_widget_set_events (newWindow, GDK_KEY_PRESS_MASK | GDK_KEY_RELEASE_MASK);
-    gtk_window_set_resizable (GTK_WINDOW(newWindow), TRUE);
+    for (i = 0; i < PAGE_COUNT; i++)
+        if (x >= tab_rects[i].x && x < tab_rects[i].x + tab_rects[i].w &&
+            y >= tab_rects[i].y && y < tab_rects[i].y + tab_rects[i].h) {
+            switch_page ((T_page) i);
+            return;
+        }
 
-    /* Create store to point us back to page for later */
-    pageData = g_new( WidgetPageData, 1 );
-    pageData->parent = page;
-    pageData->widget = child;
-    pageData->pageNo = pageNo;
-
-    /* Move main widget to window */
-    //gtk_widget_reparent (child, newWindow);
-    g_object_ref (child);
-    gtk_container_remove(GTK_CONTAINER (gtk_widget_get_parent (child)), child);
-    gtk_container_add(GTK_CONTAINER (newWindow), child);
-    g_object_unref (child);
-
-
-    /* Pass ID of parent (to put widget back) to window's destroy */
-    g_signal_connect (G_OBJECT(newWindow), "destroy",
-                        G_CALLBACK(destroy_page_window),
-                        (gpointer)(pageData));
-
-    gtk_widget_show_all( newWindow );
-
-    /* cure annoying side effect */
-    if (gmsgstate)
-        fields_gmsginput(TRUE);
-    else
-        fields_gmsginput(FALSE);
-
+    /* Channel-list row clicks aren't hit-tested (partyline_render()
+       doesn't expose per-row rects) -- joining a channel by typing
+       "/join #name" in the partyline entry always works, matching the
+       original's own "parsing can't be perfect, so make sure they can
+       do it by hand" fallback. */
 }
 
-/* show the fields notebook tab */
-void show_fields_page (void)
+static void
+route_keydown (int keycode)
 {
-    gtk_notebook_set_current_page (GTK_NOTEBOOK(notebook), 0);
+    if (dialog_is_open ()) {
+        if (keycode == SDLK_BACKSPACE)
+            dialog_backspace ();
+        else
+            dialog_keydown (keycode);
+        return;
+    }
+
+    if (SDL_GetModState () & KMOD_ALT) {
+        if (keycode == SDLK_1) { switch_page (PAGE_FIELDS); return; }
+        if (keycode == SDLK_2) { switch_page (PAGE_PARTYLINE); return; }
+        if (keycode == SDLK_3) { switch_page (PAGE_WINLIST); return; }
+    }
+
+    if (current_page == PAGE_FIELDS) {
+        if (gmsgstate) {
+            if (keycode == SDLK_RETURN || keycode == SDLK_KP_ENTER)
+                gmsg_submit ();
+            else if (keycode == SDLK_BACKSPACE)
+                fields_gmsg_backspace ();
+            return;
+        }
+        if (ingame && keycode == keys[K_GAMEMSG]) {
+            gmsgstate = 1;
+            fields_gmsginputactivate (1);
+            fields_gmsginput (1);
+            return;
+        }
+        tetrinet_key (keycode);
+    }
+    else if (current_page == PAGE_PARTYLINE) {
+        if (keycode == SDLK_BACKSPACE)
+            partyline_backspace ();
+        else
+            partyline_keydown (keycode);
+    }
 }
 
-/* show the partyline notebook tab */
-void show_partyline_page (void)
+static void
+route_keyup (int keycode)
 {
-    gtk_notebook_set_current_page (GTK_NOTEBOOK(notebook), 1);
+    if (dialog_is_open ())
+        return;
+    if (current_page == PAGE_FIELDS && !gmsgstate)
+        tetrinet_upkey (keycode);
 }
 
-void unblock_keyboard_signal (void)
+static void
+route_textinput (const char *text)
 {
-    g_signal_handler_unblock (app, keypress_signal);
+    if (dialog_is_open ()) {
+        dialog_textinput (text);
+        return;
+    }
+    if (current_page == PAGE_FIELDS && gmsgstate)
+        fields_gmsg_textinput (text);
+    else if (current_page == PAGE_PARTYLINE)
+        partyline_textinput (text);
 }
 
-void switch_focus (GtkNotebook *notebook,
-                   void *page,
-                   guint page_num)
+int
+main (int argc, char *argv[])
 {
-    if (connected)
-      switch (page_num)
-      {
-        case 0:
-          if (gmsgstate) fields_gmsginputactivate (1);
-          else partyline_entryfocus ();
-          break;
-        case 1: partyline_entryfocus (); break;
-        case 2: winlist_focus (); break;
-      }
+    char *option_connect = NULL, *option_nick = NULL, *option_team = NULL, *option_pass = NULL;
+    int option_spec = 0;
+    int i;
+    Uint32 last_tick;
+
+    for (i = 1; i < argc; i++) {
+        if ((strcmp (argv[i], "-c") == 0 || strcmp (argv[i], "--connect") == 0) && i + 1 < argc)
+            option_connect = argv[++i];
+        else if ((strcmp (argv[i], "-n") == 0 || strcmp (argv[i], "--nickname") == 0) && i + 1 < argc)
+            option_nick = argv[++i];
+        else if ((strcmp (argv[i], "-t") == 0 || strcmp (argv[i], "--team") == 0) && i + 1 < argc)
+            option_team = argv[++i];
+        else if (strcmp (argv[i], "-s") == 0 || strcmp (argv[i], "--spectate") == 0)
+            option_spec = 1;
+        else if ((strcmp (argv[i], "-p") == 0 || strcmp (argv[i], "--password") == 0) && i + 1 < argc)
+            option_pass = argv[++i];
+    }
+
+    srand ((unsigned int) time (NULL));
+
+    if (SDL_Init (SDL_INIT_VIDEO | SDL_INIT_AUDIO) != 0) {
+        fprintf (stderr, "SDL_Init failed: %s\n", SDL_GetError ());
+        return 1;
+    }
+    IMG_Init (IMG_INIT_PNG);
+#if SDL_MAJOR_VERSION >= 2
+    SDL_StartTextInput ();
+#else
+    SDL_EnableUNICODE (1);
+    SDL_EnableKeyRepeat (SDL_DEFAULT_REPEAT_DELAY, SDL_DEFAULT_REPEAT_INTERVAL);
+#endif
+
+    if (misc_font_init (GTETRINET_DATA "/fonts/DejaVuSans.ttf", 14) != 0)
+        fprintf (stderr, "Warning: could not load bundled font, text will not render.\n");
+
+    if (sound_init () != 0)
+        soundenable = 0;
+
+    config_loadconfig ();
+    config_loadconfig_keys ();
+    config_loadconfig_themes ();
+
+    if (fields_init () != 0) {
+        fprintf (stderr, "fields_init failed\n");
+        return 1;
+    }
+    fields_page_new ();
+    ensure_fields_canvas ();
+
+    partyline_page_new ();
+    if (winlist_page_new () != 0)
+        fprintf (stderr, "Warning: winlist icons failed to load.\n");
+
+    win_w = fields_screen_width ();
+    if (win_w < 560) win_w = 560;
+    win_h = misc_font_line_height () * 2 + 24 + fields_screen_height ();
+    if (win_h < 500) win_h = 500;
+
+    if (video_init (win_w, win_h) != 0) {
+        fprintf (stderr, "video_init failed: %s\n", SDL_GetError ());
+        return 1;
+    }
+    set_window_icon ();
+    layout_chrome ();
+
+    commands_init ();
+    partyline_show_channel_list (list_enabled);
+    commands_checkstate ();
+
+    if (option_nick) GTET_O_STRCPY (nick, option_nick);
+    if (option_team) GTET_O_STRCPY (team, option_team);
+    if (option_pass) GTET_O_STRCPY (specpassword, option_pass);
+    if (option_spec) spectating = 1;
+    if (option_connect)
+        client_init (option_connect, nick);
+
+    app_mainloop_running = 1;
+    last_tick = SDL_GetTicks ();
+
+    while (running) {
+        SDL_Event ev;
+        Uint32 now;
+
+        while (SDL_PollEvent (&ev)) {
+            switch (ev.type) {
+            case SDL_QUIT:
+                running = 0;
+                break;
+            case SDL_KEYDOWN:
+                route_keydown (ev.key.keysym.sym);
+#if SDL_MAJOR_VERSION < 2
+                if (ev.key.keysym.unicode >= 32 && ev.key.keysym.unicode < 127) {
+                    char buf[2];
+                    buf[0] = (char) ev.key.keysym.unicode;
+                    buf[1] = 0;
+                    route_textinput (buf);
+                }
+#endif
+                break;
+            case SDL_KEYUP:
+                route_keyup (ev.key.keysym.sym);
+                break;
+#if SDL_MAJOR_VERSION >= 2
+            case SDL_TEXTINPUT:
+                route_textinput (ev.text.text);
+                break;
+#endif
+            case SDL_MOUSEBUTTONDOWN:
+                if (ev.button.button == SDL_BUTTON_LEFT)
+                    route_click (ev.button.x, ev.button.y);
+                break;
+            default:
+                break;
+            }
+        }
+
+        sched_tick ();
+        client_poll_connect ();
+        client_poll_socket ();
+        dialog_tick ();
+
+        render_frame ();
+
+        now = SDL_GetTicks ();
+        if (now - last_tick < 16)
+            SDL_Delay (16 - (now - last_tick));
+        last_tick = SDL_GetTicks ();
+    }
+
+    client_disconnect ();
+    fields_cleanup ();
+    winlist_page_cleanup ();
+    sound_cleanup ();
+    misc_font_cleanup ();
+    if (fields_canvas)
+        SDL_FreeSurface (fields_canvas);
+
+    SDL_Quit ();
+
+    return 0;
 }
