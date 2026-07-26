@@ -21,6 +21,18 @@ extern void config_loadconfig (void);
 extern void config_loadconfig_keys (void);
 extern void config_loadconfig_themes (void);
 
+/* Setters, used by dialogs.c to persist player-changed settings now
+   that GSettings is gone. */
+extern void config_set_server (const char *server);
+extern void config_set_nickname (const char *nick);
+extern void config_set_team (const char *team);
+extern void config_set_gamemode (int mode);
+extern void config_set_sound_enable (int enable);
+extern void config_set_timestamps_enable (int enable);
+extern void config_set_channel_list_enable (int enable);
+extern void config_set_theme_directory (const char *dir);
+extern void config_set_key (int keyidx, int keycode);
+
 #define GTETRINET_THEMES GTETRINET_DATA"/themes"
 #define DEFAULTTHEME GTETRINET_THEMES"/default/"
 

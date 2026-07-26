@@ -426,3 +426,83 @@ void config_loadconfig_keys (void)
         keys[keybindings[i].keyidx] = code ? code : defaultkeys[keybindings[i].keyidx];
     }
 }
+
+/* --- setters, used by dialogs.c's connect/team/preferences dialogs to
+ * persist what the player changes (replacing direct g_settings_set_*
+ * calls, since GSettings is gone -- see config_ensure_loaded() above). */
+
+void config_set_server (const char *server)
+{
+    config_set_string ("General", "server", server);
+}
+
+void config_set_nickname (const char *nick)
+{
+    config_set_string ("General", "player-nickname", nick);
+}
+
+void config_set_team (const char *team)
+{
+    config_set_string ("General", "player-team", team);
+}
+
+void config_set_gamemode (int mode)
+{
+    config_ensure_loaded ();
+    g_key_file_set_boolean (cfg, "General", "gamemode", mode ? TRUE : FALSE);
+    config_save ();
+}
+
+void config_set_sound_enable (int enable)
+{
+    config_ensure_loaded ();
+    g_key_file_set_boolean (cfg, "General", "sound-enable", enable ? TRUE : FALSE);
+    config_save ();
+}
+
+void config_set_timestamps_enable (int enable)
+{
+    config_ensure_loaded ();
+    g_key_file_set_boolean (cfg, "General", "partyline-enable-timestamps", enable ? TRUE : FALSE);
+    config_save ();
+}
+
+void config_set_channel_list_enable (int enable)
+{
+    config_ensure_loaded ();
+    g_key_file_set_boolean (cfg, "General", "partyline-enable-channel-list", enable ? TRUE : FALSE);
+    config_save ();
+}
+
+void config_set_theme_directory (const char *dir)
+{
+    config_set_string ("Theme", "directory", dir);
+}
+
+/* Reverse of keyname_to_code(), used when persisting a newly bound key. */
+static const char *
+code_to_keyname (int code)
+{
+    int i;
+    for (i = 0; keynames[i].name != NULL; i++)
+        if (keynames[i].keycode == code)
+            return keynames[i].name;
+    return NULL;
+}
+
+void config_set_key (int keyidx, int keycode)
+{
+    static const char *cfgkeys[K_NUM] = {
+        "right", "left", "rotate-right", "rotate-left", "down", "drop",
+        "discard", "message", "special1", "special2", "special3",
+        "special4", "special5", "special6",
+    };
+    const char *name;
+
+    if (keyidx < 0 || keyidx >= K_NUM)
+        return;
+    keys[keyidx] = keycode;
+    name = code_to_keyname (keycode);
+    if (name)
+        config_set_string ("Keys", cfgkeys[keyidx], name);
+}

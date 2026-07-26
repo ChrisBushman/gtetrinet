@@ -17,962 +17,1176 @@
  *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
-#ifdef HAVE_CONFIG_H
-#include <config.h>
-#endif
-
-#include <gtk/gtk.h>
-#include <glib/gi18n.h>
+#include <string.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <sys/types.h>
 #include <dirent.h>
-#include <stdlib.h>
+#include <glib.h>
+#include <SDL.h>
 
-#include "gtetrinet.h"
 #include "gtet_config.h"
 #include "client.h"
 #include "tetrinet.h"
-#include "tetris.h"
-#include "fields.h"
 #include "misc.h"
 #include "sound.h"
 #include "partyline.h"
+#include "dialogs.h"
 
-/* Adopted and renamed from libgnomeui */
-#define GTET_PAD 8
-#define GTET_PAD_SMALL 4
+/* Forward declarations instead of pulling in the still-GTK gtetrinet.h,
+ * same approach config.c/commands.c already use. */
+extern int gamemode;
+#define ORIGINAL 0
+#define TETRIFAST 1
 
-extern GtkWidget *app;
+#define DLG_PAD 8
 
-/*****************************************************/
-/* connecting dialog - a dialog with a cancel button */
-/*****************************************************/
-static GtkWidget *connectingdialog = 0, *connectdialog;
-static GtkWidget *progressbar;
-static gint timeouttag = 0;
+/* --- shared drawing/hit-test helpers -------------------------------- */
 
-GtkWidget *team_dialog;
-
-void connectingdialog_button (GtkWidget *dialog, gint button)
+static void
+fill_box (SDL_Surface *dst, const SDL_Rect *r, Uint8 gr, Uint8 gg, Uint8 gb)
 {
-    dialog = dialog;
-    switch (button) {
-    case GTK_RESPONSE_CANCEL:
-        g_source_remove (timeouttag);
-        timeouttag = 0;
-        if (connectingdialog == 0) return;
-        client_disconnect ();
-        gtk_widget_destroy (connectingdialog);
-        connectingdialog = 0;
-        break;
+    SDL_FillRect (dst, r, SDL_MapRGB (dst->format, gr, gg, gb));
+}
+
+static void
+draw_border (SDL_Surface *dst, const SDL_Rect *r, Uint8 gr, Uint8 gg, Uint8 gb)
+{
+    Uint32 c = SDL_MapRGB (dst->format, gr, gg, gb);
+    SDL_Rect top = { r->x, r->y, r->w, 1 };
+    SDL_Rect bottom = { r->x, r->y + r->h - 1, r->w, 1 };
+    SDL_Rect left = { r->x, r->y, 1, r->h };
+    SDL_Rect right = { r->x + r->w - 1, r->y, 1, r->h };
+    SDL_FillRect (dst, &top, c);
+    SDL_FillRect (dst, &bottom, c);
+    SDL_FillRect (dst, &left, c);
+    SDL_FillRect (dst, &right, c);
+}
+
+static void
+draw_text (SDL_Surface *dst, int x, int y, const char *text, int bold)
+{
+    T_textstyle style;
+    style.color.r = style.color.g = style.color.b = 0xFF;
+    style.color.a = 0xFF;
+    style.bold = bold;
+    style.italic = style.underline = 0;
+    misc_font_render (dst, x, y, &style, text, strlen (text));
+}
+
+static void
+draw_text_muted (SDL_Surface *dst, int x, int y, const char *text)
+{
+    T_textstyle style;
+    style.color.r = style.color.g = style.color.b = 0xA0;
+    style.color.a = 0xFF;
+    style.bold = style.italic = style.underline = 0;
+    misc_font_render (dst, x, y, &style, text, strlen (text));
+}
+
+static void
+draw_text_error (SDL_Surface *dst, int x, int y, const char *text)
+{
+    T_textstyle style;
+    style.color.r = 0xFF; style.color.g = 0x60; style.color.b = 0x60;
+    style.color.a = 0xFF;
+    style.bold = style.italic = style.underline = 0;
+    misc_font_render (dst, x, y, &style, text, strlen (text));
+}
+
+static void
+draw_box (SDL_Surface *dst, const SDL_Rect *r, const char *title)
+{
+    fill_box (dst, r, 28, 28, 28);
+    draw_border (dst, r, 110, 110, 110);
+    if (title)
+        draw_text (dst, r->x + DLG_PAD, r->y + DLG_PAD / 2, title, 1);
+}
+
+static void
+draw_field (SDL_Surface *dst, const SDL_Rect *r, const char *text, int focused, int enabled)
+{
+    Uint8 bg = !enabled ? 20 : (focused ? 50 : 34);
+    fill_box (dst, r, bg, bg, bg);
+    draw_border (dst, r, enabled ? 120 : 60, enabled ? 120 : 60, enabled ? 120 : 60);
+    if (enabled)
+        draw_text (dst, r->x + 4, r->y + 2, text, 0);
+    else
+        draw_text_muted (dst, r->x + 4, r->y + 2, text);
+}
+
+static void
+draw_checkbox (SDL_Surface *dst, const SDL_Rect *r, const char *label, int checked)
+{
+    fill_box (dst, r, 20, 20, 20);
+    draw_border (dst, r, 130, 130, 130);
+    if (checked) {
+        SDL_Rect inner = { r->x + 3, r->y + 3, r->w - 6, r->h - 6 };
+        fill_box (dst, &inner, 200, 200, 200);
+    }
+    draw_text (dst, r->x + r->w + 8, r->y - 2, label, 0);
+}
+
+static void
+draw_radio (SDL_Surface *dst, const SDL_Rect *r, const char *label, int selected)
+{
+    fill_box (dst, r, 20, 20, 20);
+    draw_border (dst, r, 130, 130, 130);
+    if (selected) {
+        SDL_Rect inner = { r->x + 3, r->y + 3, r->w - 6, r->h - 6 };
+        fill_box (dst, &inner, 200, 200, 200);
+    }
+    draw_text (dst, r->x + r->w + 8, r->y - 2, label, 0);
+}
+
+static void
+draw_button (SDL_Surface *dst, const SDL_Rect *r, const char *label, int enabled)
+{
+    Uint8 bg = enabled ? 60 : 40;
+    fill_box (dst, r, bg, bg, bg);
+    draw_border (dst, r, 130, 130, 130);
+    draw_text (dst, r->x + 8, r->y + (r->h - misc_font_line_height ()) / 2, label, 0);
+}
+
+static int
+point_in_rect (int x, int y, const SDL_Rect *r)
+{
+    return x >= r->x && x < r->x + r->w && y >= r->y && y < r->y + r->h;
+}
+
+/*****************************************************/
+/* connecting dialog - a dialog with a cancel button  */
+/*****************************************************/
+
+static int connectingdialog_open;
+static Uint32 connecting_last_tick;
+static int connecting_pulse_pos;
+static SDL_Rect connecting_box, connecting_bar, connecting_cancel_button;
+
+static void
+connectingdialog_layout (const SDL_Rect *rect)
+{
+    int line_h = misc_font_line_height ();
+    int w = 260, h = 90;
+
+    connecting_box.x = rect->x + (rect->w - w) / 2;
+    connecting_box.y = rect->y + (rect->h - h) / 2;
+    connecting_box.w = w;
+    connecting_box.h = h;
+
+    connecting_bar.x = connecting_box.x + DLG_PAD;
+    connecting_bar.y = connecting_box.y + DLG_PAD + line_h + 8;
+    connecting_bar.w = w - DLG_PAD * 2;
+    connecting_bar.h = 16;
+
+    connecting_cancel_button.w = 80;
+    connecting_cancel_button.h = line_h + 8;
+    connecting_cancel_button.x = connecting_box.x + (w - 80) / 2;
+    connecting_cancel_button.y = connecting_box.y + h - DLG_PAD - connecting_cancel_button.h;
+}
+
+void
+connectingdialog_new (void)
+{
+    if (connectingdialog_open)
+        return;
+    connectingdialog_open = 1;
+    connecting_pulse_pos = 0;
+    connecting_last_tick = SDL_GetTicks ();
+}
+
+void
+connectingdialog_destroy (void)
+{
+    connectingdialog_open = 0;
+}
+
+static void
+connectingdialog_cancel (void)
+{
+    client_disconnect ();
+    connectingdialog_destroy ();
+}
+
+static void
+connectingdialog_tick (void)
+{
+    Uint32 now;
+
+    if (!connectingdialog_open)
+        return;
+
+    now = SDL_GetTicks ();
+    if (now - connecting_last_tick >= 20) {
+        connecting_last_tick = now;
+        connecting_pulse_pos = (connecting_pulse_pos + 4) % 200;
     }
 }
 
-gint connectingdialog_delete (void)
+static void
+connectingdialog_render (SDL_Surface *dst, const SDL_Rect *rect)
 {
-    return TRUE; /* dont kill me */
+    SDL_Rect fill;
+    int pos;
+
+    connectingdialog_layout (rect);
+    draw_box (dst, &connecting_box, "Connect to server");
+
+    fill_box (dst, &connecting_bar, 15, 15, 15);
+    draw_border (dst, &connecting_bar, 90, 90, 90);
+    pos = connecting_pulse_pos;
+    if (pos > 100)
+        pos = 200 - pos;
+    fill.x = connecting_bar.x + (connecting_bar.w - 40) * pos / 100;
+    fill.y = connecting_bar.y + 2;
+    fill.w = 40;
+    fill.h = connecting_bar.h - 4;
+    fill_box (dst, &fill, 150, 150, 220);
+
+    draw_button (dst, &connecting_cancel_button, "Cancel", 1);
 }
 
-gint connectingdialog_timeout (void)
+static void
+connectingdialog_click (int x, int y)
 {
-    gtk_progress_bar_pulse (GTK_PROGRESS_BAR (progressbar));
-    return TRUE;
-}
-
-void connectingdialog_new (void)
-{
-    if (connectingdialog != NULL)
-    {
-      gtk_window_present (GTK_WINDOW (connectingdialog));
-      return;
-    }
-    connectingdialog = gtk_dialog_new_with_buttons ("Connect to server",
-                                                    GTK_WINDOW (connectdialog),
-                                                    GTK_DIALOG_MODAL,
-                                                    GTK_STOCK_CANCEL, GTK_RESPONSE_CANCEL,
-                                                    NULL);
-    gtk_window_set_skip_taskbar_hint (GTK_WINDOW (connectingdialog), TRUE);
-    progressbar = gtk_progress_bar_new ();
-    gtk_widget_show (progressbar);
-    gtk_box_pack_start (GTK_BOX (gtk_dialog_get_content_area(connectingdialog)),
-                        progressbar, TRUE, TRUE, 0); 
-
-
-    timeouttag = g_timeout_add (20, (GSourceFunc)connectingdialog_timeout,
-                                NULL);
-    g_signal_connect (G_OBJECT(connectingdialog), "response",
-                        G_CALLBACK(connectingdialog_button), NULL);
-    g_signal_connect (G_OBJECT(connectingdialog), "delete_event",
-                        G_CALLBACK(connectingdialog_delete), NULL);
-    gtk_widget_show (connectingdialog);
-}
-
-void connectingdialog_destroy (void)
-{
-    if (timeouttag != 0) g_source_remove (timeouttag);
-    timeouttag = 0;
-    if (connectingdialog == 0) return;
-    gtk_widget_destroy (connectingdialog);
-    connectingdialog = 0;
+    if (point_in_rect (x, y, &connecting_cancel_button))
+        connectingdialog_cancel ();
 }
 
 /*******************/
 /* the team dialog */
 /*******************/
-void teamdialog_destroy (void)
+
+static int team_dialog_open;
+static char team_buf[128];
+static int team_len;
+static SDL_Rect team_box, team_field_rect, team_ok_button, team_cancel_button;
+
+static void
+teamdialog_layout (const SDL_Rect *rect)
 {
-    gtk_widget_destroy (team_dialog);
-    team_dialog = NULL;
+    int line_h = misc_font_line_height ();
+    int w = 300, h = 120;
+
+    team_box.x = rect->x + (rect->w - w) / 2;
+    team_box.y = rect->y + (rect->h - h) / 2;
+    team_box.w = w;
+    team_box.h = h;
+
+    team_field_rect.x = team_box.x + DLG_PAD;
+    /* Title clearance (line_h + 8), then the "Team name:" label's own
+       line, then the field -- draw_field()'s caller previously put the
+       label directly above the field without budgeting for the title
+       row too, so the two text lines overlapped. */
+    team_field_rect.y = team_box.y + DLG_PAD + (line_h + 8) + (line_h + 4);
+    team_field_rect.w = w - DLG_PAD * 2;
+    team_field_rect.h = line_h + 4;
+
+    team_ok_button.w = 80;
+    team_ok_button.h = line_h + 8;
+    team_ok_button.x = team_box.x + w - DLG_PAD - 80;
+    team_ok_button.y = team_box.y + h - DLG_PAD - team_ok_button.h;
+    team_cancel_button = team_ok_button;
+    team_cancel_button.x -= 90;
 }
 
-void teamdialog_button (GtkWidget *button, gint response, gpointer data)
+void
+teamdialog_new (void)
 {
-    GtkEntry *entry = (GtkEntry*)data;//GTK_ENTRY (gnome_entry_gtk_entry ( (data)));
-    button = button; /* so we get no unused parameter warning */
-
-    switch (response)
-    {
-      case GTK_RESPONSE_OK :
-      {
-        g_settings_set_string (settings, "player-team",
-                                 gtk_entry_get_text (entry));
-        tetrinet_changeteam (gtk_entry_get_text(entry));
-      }; break;
-    }
-
-    teamdialog_destroy ();
+    if (team_dialog_open)
+        return;
+    team_dialog_open = 1;
+    GTET_O_STRCPY (team_buf, team);
+    team_len = (int) strlen (team_buf);
 }
 
-void teamdialog_new (void)
+static void
+teamdialog_close (void)
 {
-    GtkWidget *hbox, *widget, *entry;
-    gchar *team_utf8 = team;
-  
-    if (team_dialog != NULL)
-    {
-      gtk_window_present (GTK_WINDOW (team_dialog));
-      return;
-    }
+    team_dialog_open = 0;
+}
 
-    team_dialog = gtk_dialog_new_with_buttons (_("Change team"),
-                                               GTK_WINDOW (app),
-                                               0,
-                                               GTK_STOCK_CANCEL, GTK_RESPONSE_CANCEL,
-                                               GTK_STOCK_OK, GTK_RESPONSE_OK,
-                                               NULL);
-    gtk_window_set_skip_taskbar_hint (GTK_WINDOW (team_dialog), TRUE);
-    gtk_dialog_set_default_response (GTK_DIALOG (team_dialog), GTK_RESPONSE_OK);
-    gtk_window_set_position (GTK_WINDOW (team_dialog), GTK_WIN_POS_MOUSE);
-    gtk_window_set_resizable (GTK_WINDOW (team_dialog), FALSE);
+static void
+teamdialog_ok (void)
+{
+    GTET_O_STRCPY (team, team_buf);
+    config_set_team (team_buf);
+    tetrinet_changeteam (team_buf);
+    teamdialog_close ();
+}
 
-    /* entry and label */
-    hbox = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, GTET_PAD_SMALL);
-    widget = gtk_label_new ("Team name:");
-    gtk_box_pack_start (GTK_BOX (hbox), widget ,TRUE, TRUE, 0);
-    entry = gtk_entry_new_with_buffer (gtk_entry_buffer_new("Team", 4));
-    gtk_entry_set_text ((GtkEntry*)entry, team_utf8);
-    g_object_set ((GObject*)entry, "activates_default", TRUE, NULL);
-    gtk_box_pack_start (GTK_BOX (hbox), entry  ,TRUE, TRUE, 0);
-    gtk_container_set_border_width (GTK_CONTAINER (hbox), GTET_PAD_SMALL);
-    gtk_box_pack_end (GTK_BOX (gtk_dialog_get_content_area(team_dialog)), hbox ,TRUE, TRUE, 0);
+static void
+teamdialog_render (SDL_Surface *dst, const SDL_Rect *rect)
+{
+    teamdialog_layout (rect);
+    draw_box (dst, &team_box, "Change team");
+    draw_text (dst, team_box.x + DLG_PAD, team_field_rect.y - misc_font_line_height () - 2, "Team name:", 0);
+    draw_field (dst, &team_field_rect, team_buf, 1, 1);
+    draw_button (dst, &team_cancel_button, "Cancel", 1);
+    draw_button (dst, &team_ok_button, "OK", 1);
+}
 
-    /* pass the entry in the data pointer */
-    g_signal_connect (G_OBJECT(team_dialog), "response",
-                        G_CALLBACK(teamdialog_button), (gpointer)entry);
-    g_signal_connect (G_OBJECT(team_dialog), "destroy",
-                        G_CALLBACK(teamdialog_destroy), NULL);
-    gtk_widget_show_all (team_dialog);
+static void
+teamdialog_click (int x, int y)
+{
+    if (point_in_rect (x, y, &team_ok_button))
+        teamdialog_ok ();
+    else if (point_in_rect (x, y, &team_cancel_button))
+        teamdialog_close ();
+}
+
+static void
+teamdialog_textinput (const char *text)
+{
+    size_t addlen = strlen (text);
+
+    if (team_len + addlen > sizeof (team_buf) - 1)
+        addlen = sizeof (team_buf) - 1 - team_len;
+    if ((int) addlen <= 0)
+        return;
+    memcpy (team_buf + team_len, text, addlen);
+    team_len += (int) addlen;
+    team_buf[team_len] = 0;
+}
+
+static void
+teamdialog_backspace (void)
+{
+    if (team_len == 0)
+        return;
+    team_len--;
+    while (team_len > 0 && ((unsigned char) team_buf[team_len] & 0xC0) == 0x80)
+        team_len--;
+    team_buf[team_len] = 0;
+}
+
+static void
+teamdialog_keydown (int keycode)
+{
+    if (keycode == SDLK_RETURN || keycode == SDLK_KP_ENTER)
+        teamdialog_ok ();
+    else if (keycode == SDLK_ESCAPE)
+        teamdialog_close ();
 }
 
 /**********************/
 /* the connect dialog */
 /**********************/
-static int connecting;
-static GtkWidget *serveraddressentry, *nicknameentry, *teamnameentry, *spectatorcheck, *passwordentry;
-static GtkWidget *passwordlabel, *teamnamelabel;
-static GtkWidget *originalradio, *tetrifastradio;
-static GSList *gametypegroup;
 
-void connectdialog_button (GtkDialog *dialog, gint button)
+typedef enum {
+    CONNECT_FOCUS_SERVER,
+    CONNECT_FOCUS_NICK,
+    CONNECT_FOCUS_TEAM,
+    CONNECT_FOCUS_PASSWORD
+} T_connect_focus;
+
+static int connectdialog_open;
+static char connect_server_buf[256];
+static char connect_nick_buf[128];
+static char connect_team_buf[128];
+static char connect_password_buf[128];
+static int connect_spectator;
+static T_connect_focus connect_focus;
+static char connect_error[256];
+
+static SDL_Rect connect_box;
+static SDL_Rect connect_server_field, connect_nick_field, connect_team_field, connect_password_field;
+static SDL_Rect connect_spectator_check, connect_original_radio, connect_tetrifast_radio;
+static SDL_Rect connect_ok_button, connect_cancel_button;
+
+static char *
+connect_focus_buf (T_connect_focus f, int *len_out)
 {
-    gchar *nick; /* intermediate buffer for recoding purposes */
-    const gchar *server1;
-    GtkWidget *dialog_error;
+    switch (f) {
+    case CONNECT_FOCUS_SERVER:   *len_out = (int) strlen (connect_server_buf);   return connect_server_buf;
+    case CONNECT_FOCUS_NICK:     *len_out = (int) strlen (connect_nick_buf);     return connect_nick_buf;
+    case CONNECT_FOCUS_TEAM:     *len_out = (int) strlen (connect_team_buf);     return connect_team_buf;
+    case CONNECT_FOCUS_PASSWORD: *len_out = (int) strlen (connect_password_buf); return connect_password_buf;
+    }
+    *len_out = 0;
+    return connect_server_buf;
+}
 
-    switch (button) {
-    case GTK_RESPONSE_OK:
-        /* connect now */
-        server1 = gtk_entry_get_text ((GtkEntry*)serveraddressentry);
-        if (g_utf8_strlen (server1, -1) <= 0)
-        {
-          dialog_error = gtk_message_dialog_new (GTK_WINDOW (dialog),
-                                                 GTK_DIALOG_MODAL,
-                                                 GTK_MESSAGE_ERROR,
-                                                 GTK_BUTTONS_OK,
-                                                 "You must specify a server name.");
-          gtk_dialog_run (GTK_DIALOG (dialog_error));
-          gtk_widget_destroy (dialog_error);
-          return;
-        }
+static void
+connectdialog_layout (const SDL_Rect *rect)
+{
+    int line_h = misc_font_line_height ();
+    int w = 420, h = 300;
+    int x, y, field_w;
 
-	//spectating = GTK_TOGGLE_BUTTON(spectatorcheck)->active ? TRUE : FALSE;
-	spectating = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(spectatorcheck));
+    connect_box.x = rect->x + (rect->w - w) / 2;
+    connect_box.y = rect->y + (rect->h - h) / 2;
+    connect_box.w = w;
+    connect_box.h = h;
 
-        if (spectating)
-        {
-          g_utf8_strncpy (specpassword, gtk_entry_get_text (GTK_ENTRY(passwordentry)),
-                          g_utf8_strlen (gtk_entry_get_text (GTK_ENTRY (passwordentry)), -1));
-          if (g_utf8_strlen (specpassword, -1) <= 0)
-          {
-            dialog_error = gtk_message_dialog_new (GTK_WINDOW (dialog),
-                                                   GTK_DIALOG_MODAL,
-                                                   GTK_MESSAGE_ERROR,
-                                                   GTK_BUTTONS_OK,
-                                                   "Please specify a password to connect as spectator.");
-            gtk_dialog_run (GTK_DIALOG (dialog_error));
-            gtk_widget_destroy (dialog_error);
+    x = connect_box.x + DLG_PAD;
+    y = connect_box.y + DLG_PAD + line_h + 8;
+    field_w = w - DLG_PAD * 2 - 100;
+
+    connect_server_field.x = x + 100; connect_server_field.y = y; connect_server_field.w = field_w; connect_server_field.h = line_h + 4;
+    y += line_h + 10;
+    connect_nick_field.x = x + 100; connect_nick_field.y = y; connect_nick_field.w = field_w; connect_nick_field.h = line_h + 4;
+    y += line_h + 10;
+    connect_team_field.x = x + 100; connect_team_field.y = y; connect_team_field.w = field_w; connect_team_field.h = line_h + 4;
+    y += line_h + 14;
+
+    connect_spectator_check.x = x; connect_spectator_check.y = y; connect_spectator_check.w = 14; connect_spectator_check.h = 14;
+    y += line_h + 8;
+    connect_password_field.x = x + 100; connect_password_field.y = y; connect_password_field.w = field_w; connect_password_field.h = line_h + 4;
+    y += line_h + 16;
+
+    connect_original_radio.x = x; connect_original_radio.y = y; connect_original_radio.w = 14; connect_original_radio.h = 14;
+    connect_tetrifast_radio.x = x + 160; connect_tetrifast_radio.y = y; connect_tetrifast_radio.w = 14; connect_tetrifast_radio.h = 14;
+
+    connect_ok_button.w = 80;
+    connect_ok_button.h = line_h + 8;
+    connect_ok_button.x = connect_box.x + w - DLG_PAD - 80;
+    connect_ok_button.y = connect_box.y + h - DLG_PAD - connect_ok_button.h;
+    connect_cancel_button = connect_ok_button;
+    connect_cancel_button.x -= 90;
+}
+
+void
+connectdialog_new (void)
+{
+    if (connectdialog_open)
+        return;
+    connectdialog_open = 1;
+    connect_error[0] = 0;
+    GTET_O_STRCPY (connect_server_buf, server);
+    GTET_O_STRCPY (connect_nick_buf, nick);
+    GTET_O_STRCPY (connect_team_buf, team);
+    connect_password_buf[0] = 0;
+    connect_spectator = spectating;
+    connect_focus = CONNECT_FOCUS_SERVER;
+}
+
+static void
+connectdialog_close (void)
+{
+    connectdialog_open = 0;
+}
+
+void
+connectdialog_connected (void)
+{
+    connectdialog_close ();
+}
+
+static void
+connectdialog_ok (void)
+{
+    gchar *nick_stripped;
+
+    if (strlen (connect_server_buf) == 0) {
+        GTET_O_STRCPY (connect_error, "You must specify a server name.");
+        return;
+    }
+
+    spectating = connect_spectator;
+    if (spectating) {
+        if (strlen (connect_password_buf) == 0) {
+            GTET_O_STRCPY (connect_error, "Please specify a password to connect as spectator.");
             return;
-          }
         }
-        
-        GTET_O_STRCPY (team, gtk_entry_get_text((GtkEntry*)teamnameentry));
-        
-        nick = g_strdup (gtk_entry_get_text ((GtkEntry*)nicknameentry));
-        g_strstrip (nick); /* we remove leading and trailing whitespaces */
-        if (g_utf8_strlen (nick, -1) > 0)
-        {
-          client_init (server1, nick);
+        GTET_O_STRCPY (specpassword, connect_password_buf);
+    }
+
+    GTET_O_STRCPY (team, connect_team_buf);
+
+    nick_stripped = g_strdup (connect_nick_buf);
+    g_strstrip (nick_stripped);
+    if (strlen (nick_stripped) == 0) {
+        GTET_O_STRCPY (connect_error, "Please specify a valid nickname.");
+        g_free (nick_stripped);
+        return;
+    }
+
+    client_init (connect_server_buf, nick_stripped);
+
+    config_set_server (connect_server_buf);
+    config_set_nickname (nick_stripped);
+    config_set_team (connect_team_buf);
+    config_set_gamemode (gamemode);
+
+    g_free (nick_stripped);
+
+    connectdialog_close ();
+}
+
+static void
+connectdialog_spectoggle (void)
+{
+    connect_spectator = !connect_spectator;
+    /* Matches connectdialog_spectoggle()'s original sensitivity swap:
+       team name is meaningless while spectating (no team to join), and
+       the password is meaningless otherwise. If focus was sitting on
+       the field that just became disabled, move it off. */
+    if (connect_spectator && connect_focus == CONNECT_FOCUS_TEAM)
+        connect_focus = CONNECT_FOCUS_PASSWORD;
+    else if (!connect_spectator && connect_focus == CONNECT_FOCUS_PASSWORD)
+        connect_focus = CONNECT_FOCUS_TEAM;
+}
+
+static void
+connectdialog_render (SDL_Surface *dst, const SDL_Rect *rect)
+{
+    int line_h = misc_font_line_height ();
+
+    connectdialog_layout (rect);
+    draw_box (dst, &connect_box, "Connect to server");
+
+    draw_text (dst, connect_box.x + DLG_PAD, connect_server_field.y + 2, "Server:", 0);
+    draw_field (dst, &connect_server_field, connect_server_buf, connect_focus == CONNECT_FOCUS_SERVER, 1);
+
+    draw_text (dst, connect_box.x + DLG_PAD, connect_nick_field.y + 2, "Nick name:", 0);
+    draw_field (dst, &connect_nick_field, connect_nick_buf, connect_focus == CONNECT_FOCUS_NICK, 1);
+
+    draw_text (dst, connect_box.x + DLG_PAD, connect_team_field.y + 2, "Team name:", 0);
+    draw_field (dst, &connect_team_field, connect_team_buf, connect_focus == CONNECT_FOCUS_TEAM, !connect_spectator);
+
+    draw_checkbox (dst, &connect_spectator_check, "Connect as a spectator", connect_spectator);
+
+    draw_text (dst, connect_box.x + DLG_PAD, connect_password_field.y + 2, "Password:", 0);
+    draw_field (dst, &connect_password_field, connect_password_buf, connect_focus == CONNECT_FOCUS_PASSWORD, connect_spectator);
+
+    draw_radio (dst, &connect_original_radio, "Original", gamemode == ORIGINAL);
+    draw_radio (dst, &connect_tetrifast_radio, "TetriFast", gamemode == TETRIFAST);
+
+    if (connect_error[0])
+        draw_text_error (dst, connect_box.x + DLG_PAD, connect_ok_button.y - line_h - 4, connect_error);
+
+    draw_button (dst, &connect_cancel_button, "Cancel", 1);
+    draw_button (dst, &connect_ok_button, "OK", 1);
+}
+
+static void
+connectdialog_click (int x, int y)
+{
+    if (point_in_rect (x, y, &connect_ok_button)) { connectdialog_ok (); return; }
+    if (point_in_rect (x, y, &connect_cancel_button)) { connectdialog_close (); return; }
+    if (point_in_rect (x, y, &connect_server_field)) { connect_focus = CONNECT_FOCUS_SERVER; return; }
+    if (point_in_rect (x, y, &connect_nick_field)) { connect_focus = CONNECT_FOCUS_NICK; return; }
+    if (!connect_spectator && point_in_rect (x, y, &connect_team_field)) { connect_focus = CONNECT_FOCUS_TEAM; return; }
+    if (connect_spectator && point_in_rect (x, y, &connect_password_field)) { connect_focus = CONNECT_FOCUS_PASSWORD; return; }
+    if (point_in_rect (x, y, &connect_spectator_check)) { connectdialog_spectoggle (); return; }
+    if (point_in_rect (x, y, &connect_original_radio)) { gamemode = ORIGINAL; return; }
+    if (point_in_rect (x, y, &connect_tetrifast_radio)) { gamemode = TETRIFAST; return; }
+}
+
+static void
+connectdialog_textinput (const char *text)
+{
+    int len;
+    char *buf = connect_focus_buf (connect_focus, &len);
+    size_t cap = (connect_focus == CONNECT_FOCUS_SERVER) ? sizeof (connect_server_buf)
+               : (connect_focus == CONNECT_FOCUS_NICK)   ? sizeof (connect_nick_buf)
+               : (connect_focus == CONNECT_FOCUS_TEAM)   ? sizeof (connect_team_buf)
+               :                                            sizeof (connect_password_buf);
+    size_t addlen = strlen (text);
+
+    if ((size_t) len + addlen > cap - 1)
+        addlen = cap - 1 - (size_t) len;
+    if ((int) addlen <= 0)
+        return;
+    memcpy (buf + len, text, addlen);
+    buf[len + (int) addlen] = 0;
+}
+
+static void
+connectdialog_backspace (void)
+{
+    int len;
+    char *buf = connect_focus_buf (connect_focus, &len);
+
+    if (len == 0)
+        return;
+    len--;
+    while (len > 0 && ((unsigned char) buf[len] & 0xC0) == 0x80)
+        len--;
+    buf[len] = 0;
+}
+
+static void
+connectdialog_keydown (int keycode)
+{
+    if (keycode == SDLK_RETURN || keycode == SDLK_KP_ENTER) {
+        connectdialog_ok ();
+    }
+    else if (keycode == SDLK_ESCAPE) {
+        connectdialog_close ();
+    }
+    else if (keycode == SDLK_TAB) {
+        switch (connect_focus) {
+        case CONNECT_FOCUS_SERVER: connect_focus = CONNECT_FOCUS_NICK; break;
+        case CONNECT_FOCUS_NICK:
+            connect_focus = connect_spectator ? CONNECT_FOCUS_PASSWORD : CONNECT_FOCUS_TEAM;
+            break;
+        case CONNECT_FOCUS_TEAM:
+        case CONNECT_FOCUS_PASSWORD:
+            connect_focus = CONNECT_FOCUS_SERVER;
+            break;
         }
-        else
-        {
-            dialog_error = gtk_message_dialog_new (GTK_WINDOW (dialog),
-                                                   GTK_DIALOG_MODAL,
-                                                   GTK_MESSAGE_ERROR,
-                                                   GTK_BUTTONS_OK,
-                                                   "Please specify a valid nickname.");
-            gtk_dialog_run (GTK_DIALOG (dialog_error));
-            gtk_widget_destroy (dialog_error);
-            return;
-        }
-        
-        g_settings_set_string (settings, "server", server1);
-        g_settings_set_string (settings, "player-nickname", nick);
-        g_settings_set_string (settings, "player-team",
-                                 gtk_entry_get_text ((GtkEntry*)teamnameentry));
-        g_settings_set_boolean (settings, "gamemode", gamemode);
-
-        g_free (nick);
-        break;
-    case GTK_RESPONSE_CANCEL:
-        gtk_widget_destroy (connectdialog);
-        break;
     }
 }
-
-void connectdialog_spectoggle (GtkWidget *widget)
-{
-    //if (GTK_TOGGLE_BUTTON(widget)->active) {
-    if (gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(widget))) {
-        gtk_widget_set_sensitive (passwordentry, TRUE);
-        gtk_widget_set_sensitive (passwordlabel, TRUE);
-        gtk_widget_set_sensitive (teamnameentry, FALSE);
-        gtk_widget_set_sensitive (teamnamelabel, FALSE);
-    }
-    else {
-        gtk_widget_set_sensitive (passwordentry, FALSE);
-        gtk_widget_set_sensitive (passwordlabel, FALSE);
-        gtk_widget_set_sensitive (teamnameentry, TRUE);
-        gtk_widget_set_sensitive (teamnamelabel, TRUE);
-    }
-}
-
-void connectdialog_originaltoggle (GtkWidget *widget)
-{
-    if (gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(widget))) {
-    //if (GTK_TOGGLE_BUTTON(widget)-> active) {
-        gamemode = ORIGINAL;
-    }
-}
-
-void connectdialog_tetrifasttoggle (GtkWidget *widget)
-{
-    //if (GTK_TOGGLE_BUTTON(widget)-> active) {
-    if (gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(widget))) {
-        gamemode = TETRIFAST;
-    }
-}
-
-void connectdialog_connected (void)
-{
-    if (connectdialog != NULL) gtk_widget_destroy (connectdialog);
-}
-
-void connectdialog_destroy (void)
-{
-    connecting = FALSE;
-}
-
-void connectdialog_new (void)
-{
-    GtkWidget *widget, *table1, *table2, *frame;
-    /* check if dialog is already displayed */
-    if (connecting) 
-    {
-      gtk_window_present (GTK_WINDOW (connectdialog));
-      return;
-    }
-    connecting = TRUE;
-
-    /* make dialog that asks for address/nickname */
-    connectdialog = gtk_dialog_new_with_buttons ("Connect to server",
-                                                 GTK_WINDOW (app),
-                                                 0,
-                                                 GTK_STOCK_CANCEL, GTK_RESPONSE_CANCEL,
-                                                 GTK_STOCK_OK, GTK_RESPONSE_OK,
-                                                 NULL);
-    gtk_dialog_set_default_response (GTK_DIALOG (connectdialog), GTK_RESPONSE_OK);
-    gtk_window_set_resizable (GTK_WINDOW (connectdialog), FALSE);
-    g_signal_connect (G_OBJECT(connectdialog), "response",
-                        G_CALLBACK(connectdialog_button), NULL);
-
-    /* main table */
-    table1 = gtk_table_new (2, 2, FALSE);
-    gtk_table_set_row_spacings (GTK_TABLE(table1), GTET_PAD_SMALL);
-    gtk_table_set_col_spacings (GTK_TABLE(table1), GTET_PAD_SMALL);
-
-    /* server address */
-    table2 = gtk_table_new (2, 1, FALSE);
-
-    serveraddressentry = gtk_entry_new_with_buffer (gtk_entry_buffer_new("Server", 6));
-    g_object_set((GObject*)serveraddressentry,
-                 "activates_default", TRUE, NULL);
-    gtk_entry_set_text ((GtkEntry*)serveraddressentry, server);
-    gtk_widget_show (serveraddressentry);
-    gtk_table_attach (GTK_TABLE(table2), serveraddressentry,
-                      0, 1, 0, 1, GTK_FILL | GTK_EXPAND,
-                      GTK_FILL | GTK_EXPAND, 0, 0);
-    /* game type radio buttons */
-    originalradio = gtk_radio_button_new_with_mnemonic (NULL, "O_riginal");
-    gametypegroup = gtk_radio_button_get_group (GTK_RADIO_BUTTON(originalradio));
-    tetrifastradio = gtk_radio_button_new_with_mnemonic (gametypegroup, "Tetri_Fast");
-    switch (gamemode) {
-    case ORIGINAL:
-        gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(originalradio), TRUE);
-        break;
-    case TETRIFAST:
-        gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(tetrifastradio), TRUE);
-        break;
-    }
-    gtk_widget_show (originalradio);
-    gtk_widget_show (tetrifastradio);
-    widget = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, GTET_PAD_SMALL);
-    gtk_box_pack_start (GTK_BOX(widget), originalradio, 0, 0, 0);
-    gtk_box_pack_start (GTK_BOX(widget), tetrifastradio, 0, 0, 0);
-    gtk_widget_show (widget);
-    gtk_table_attach (GTK_TABLE(table2), widget,
-                      0, 1, 1, 2, GTK_FILL, GTK_FILL, 0, 0);
-
-    gtk_table_set_row_spacings (GTK_TABLE(table2), GTET_PAD_SMALL);
-    gtk_table_set_col_spacings (GTK_TABLE(table2), GTET_PAD_SMALL);
-    gtk_container_set_border_width (GTK_CONTAINER(table2), GTET_PAD);
-    gtk_widget_show (table2);
-    frame = gtk_frame_new ("Server address");
-    gtk_container_add (GTK_CONTAINER(frame), table2);
-    gtk_widget_show (frame);
-    gtk_table_attach (GTK_TABLE(table1), frame, 0, 2, 0, 1,
-                      GTK_FILL | GTK_EXPAND, GTK_FILL | GTK_EXPAND, 0, 0);
-
-    /* spectator checkbox + password */
-    table2 = gtk_table_new (1, 1, FALSE);
-
-    spectatorcheck = gtk_check_button_new_with_mnemonic ("Connect as a _spectator");
-    gtk_widget_show (spectatorcheck);
-    gtk_table_attach (GTK_TABLE(table2), spectatorcheck, 0, 2, 0, 1,
-                      GTK_FILL | GTK_EXPAND, GTK_FILL | GTK_EXPAND, 0, 0);
-    passwordlabel = gtk_label_new_with_mnemonic ("_Password:");
-    gtk_widget_show (passwordlabel);
-    gtk_table_attach (GTK_TABLE(table2), passwordlabel, 0, 1, 1, 2,
-                      GTK_FILL | GTK_EXPAND, GTK_FILL | GTK_EXPAND, 0, 0);
-    passwordentry = gtk_entry_new ();
-    gtk_label_set_mnemonic_widget (GTK_LABEL (passwordlabel), passwordentry);
-    gtk_entry_set_visibility (GTK_ENTRY(passwordentry), FALSE);
-    g_object_set(G_OBJECT(passwordentry),
-                 "activates_default", TRUE, NULL);
-    gtk_widget_show (passwordentry);
-    gtk_table_attach (GTK_TABLE(table2), passwordentry, 1, 2, 1, 2,
-                      GTK_FILL | GTK_EXPAND, GTK_FILL | GTK_EXPAND, 0, 0);
-
-    gtk_table_set_row_spacings (GTK_TABLE(table2), GTET_PAD_SMALL);
-    gtk_table_set_col_spacings (GTK_TABLE(table2), GTET_PAD_SMALL);
-    gtk_container_set_border_width (GTK_CONTAINER(table2), GTET_PAD);
-    gtk_widget_show (table2);
-    frame = gtk_frame_new ("Spectate game");
-    gtk_container_add (GTK_CONTAINER(frame), table2);
-    gtk_widget_show (frame);
-    gtk_table_attach (GTK_TABLE(table1), frame, 0, 1, 1, 2,
-                      GTK_FILL | GTK_EXPAND, GTK_FILL | GTK_EXPAND, 0, 0);
-
-    /* nickname and teamname entries */
-    table2 = gtk_table_new (1, 1, FALSE);
-
-    widget = gtk_label_new_with_mnemonic ("_Nick name:");
-    gtk_widget_show (widget);
-    gtk_table_attach (GTK_TABLE(table2), widget, 0, 1, 0, 1,
-                      GTK_FILL | GTK_EXPAND, 0, 0, 0);
-    nicknameentry = gtk_entry_new_with_buffer (gtk_entry_buffer_new("Nickname",8));
-    gtk_label_set_mnemonic_widget (GTK_LABEL (widget), nicknameentry);
-    g_object_set((GObject*)nicknameentry, "activates_default", TRUE, NULL);
-    gtk_entry_set_text ((GtkEntry*)nicknameentry, nick);
-    /* g_free (aux);*/
-    gtk_widget_show (nicknameentry);
-    gtk_table_attach (GTK_TABLE(table2), nicknameentry, 1, 2, 0, 1,
-                      GTK_FILL | GTK_EXPAND, 0, 0, 0);
-    teamnamelabel = gtk_label_new_with_mnemonic ("_Team name:");
-    gtk_widget_show (teamnamelabel);
-    gtk_table_attach (GTK_TABLE(table2), teamnamelabel, 0, 1, 1, 2,
-                      GTK_FILL | GTK_EXPAND, 0, 0, 0);
-    teamnameentry = gtk_entry_new_with_buffer (gtk_entry_buffer_new("Teamname", 8));
-    gtk_label_set_mnemonic_widget (GTK_LABEL (teamnamelabel), teamnameentry);
-    g_object_set((GObject*)teamnameentry, "activates_default", TRUE, NULL);
-    gtk_entry_set_text ((GtkEntry*)teamnameentry, team);
-    /*g_free (aux);*/
-    gtk_widget_show (teamnameentry);
-    gtk_table_attach (GTK_TABLE(table2), teamnameentry, 1, 2, 1, 2,
-                      GTK_FILL | GTK_EXPAND, 0, 0, 0);
-
-    gtk_table_set_row_spacings (GTK_TABLE(table2), GTET_PAD_SMALL);
-    gtk_table_set_col_spacings (GTK_TABLE(table2), GTET_PAD_SMALL);
-    gtk_container_set_border_width (GTK_CONTAINER(table2), GTET_PAD);
-    gtk_widget_show (table2);
-    frame = gtk_frame_new ("Player information");
-    gtk_container_add (GTK_CONTAINER(frame), table2);
-    gtk_widget_show (frame);
-    gtk_table_attach (GTK_TABLE(table1), frame, 1, 2, 1, 2,
-                      GTK_FILL | GTK_EXPAND, GTK_FILL | GTK_EXPAND, 0, 0);
-
-    gtk_widget_show (table1);
-
-    gtk_container_set_border_width (GTK_CONTAINER (table1), GTET_PAD_SMALL);
-    gtk_box_pack_start (GTK_BOX (gtk_dialog_get_content_area(connectdialog)),
-                        table1, TRUE, TRUE, 0);
-
-    gtk_toggle_button_set_active (GTK_TOGGLE_BUTTON(spectatorcheck), spectating);
-    connectdialog_spectoggle (spectatorcheck);
-    g_signal_connect (G_OBJECT(connectdialog), "destroy",
-                        G_CALLBACK(connectdialog_destroy), NULL);
-    g_signal_connect (G_OBJECT(spectatorcheck), "toggled",
-                        G_CALLBACK(connectdialog_spectoggle), NULL);
-    g_signal_connect (G_OBJECT(originalradio), "toggled",
-                        G_CALLBACK(connectdialog_originaltoggle), NULL);
-    g_signal_connect (G_OBJECT(tetrifastradio), "toggled",
-                        G_CALLBACK(connectdialog_tetrifasttoggle), NULL);
-    gtk_widget_show (connectdialog);
-}
-
-GtkWidget *prefdialog;
 
 /*************************/
 /* the change key dialog */
 /*************************/
 
-void key_dialog_callback (GtkWidget *widget, GdkEventKey *key)
+static int keydialog_open;
+static int keydialog_keyidx;
+static char keydialog_msg[256];
+static SDL_Rect keydialog_box, keydialog_cancel_button;
+
+static const char *key_action_names[K_NUM] = {
+    "Move right", "Move left", "Rotate right", "Rotate left", "Move down",
+    "Drop piece", "Discard special", "Send message",
+    "Special to field 1", "Special to field 2", "Special to field 3",
+    "Special to field 4", "Special to field 5", "Special to field 6",
+};
+
+static void
+keydialog_layout (const SDL_Rect *rect)
 {
-    gtk_dialog_response (GTK_DIALOG (widget), gdk_keyval_to_lower(key->keyval));
+    int line_h = misc_font_line_height ();
+    int w = 320, h = 100;
+
+    keydialog_box.x = rect->x + (rect->w - w) / 2;
+    keydialog_box.y = rect->y + (rect->h - h) / 2;
+    keydialog_box.w = w;
+    keydialog_box.h = h;
+
+    keydialog_cancel_button.w = 80;
+    keydialog_cancel_button.h = line_h + 8;
+    keydialog_cancel_button.x = keydialog_box.x + (w - 80) / 2;
+    keydialog_cancel_button.y = keydialog_box.y + h - DLG_PAD - keydialog_cancel_button.h;
 }
 
-gint key_dialog (char *msg)
+static void
+keydialog_start (int keyidx)
 {
-    GtkWidget *dialog, *label;
-    gint keydialog_key;
+    keydialog_open = 1;
+    keydialog_keyidx = keyidx;
+    g_snprintf (keydialog_msg, sizeof (keydialog_msg), "Press new key for \"%s\"", key_action_names[keyidx]);
+}
 
-    dialog = gtk_dialog_new_with_buttons ("Change Key", GTK_WINDOW (prefdialog),
-                                          GTK_DIALOG_MODAL | 0,
-                                          GTK_STOCK_CANCEL, GTK_RESPONSE_CLOSE,
-                                          NULL);
-    label = gtk_label_new (msg);
-    gtk_widget_show (label);
-    gtk_box_pack_start (GTK_BOX (gtk_dialog_get_content_area(dialog)),
-                        label, TRUE, TRUE, GTET_PAD_SMALL);
-    g_signal_connect (G_OBJECT (dialog), "key-press-event",
-                        G_CALLBACK (key_dialog_callback), NULL);
-    gtk_widget_set_events (dialog, GDK_KEY_PRESS_MASK);
-    keydialog_key = gtk_dialog_run (GTK_DIALOG (dialog));
-    gtk_widget_hide (dialog);
-    gtk_widget_destroy (dialog);
-    if (keydialog_key != GTK_RESPONSE_CLOSE )
-      return keydialog_key;
-    else
-      return 0;
+static void
+keydialog_render (SDL_Surface *dst, const SDL_Rect *rect)
+{
+    keydialog_layout (rect);
+    draw_box (dst, &keydialog_box, "Change Key");
+    draw_text (dst, keydialog_box.x + DLG_PAD, keydialog_box.y + DLG_PAD + misc_font_line_height () + 4, keydialog_msg, 0);
+    draw_button (dst, &keydialog_cancel_button, "Cancel", 1);
+}
+
+static void
+keydialog_click (int x, int y)
+{
+    if (point_in_rect (x, y, &keydialog_cancel_button))
+        keydialog_open = 0;
+}
+
+static void
+keydialog_keydown (int keycode)
+{
+    if (keycode == SDLK_ESCAPE) {
+        keydialog_open = 0;
+        return;
+    }
+    config_set_key (keydialog_keyidx, keycode);
+    keydialog_open = 0;
 }
 
 /**************************/
 /* the preferences dialog */
 /**************************/
-GtkWidget *themelist, *keyclist;
-GtkWidget *timestampcheck;
-GtkWidget *soundcheck;
-GtkWidget *namelabel, *authlabel, *desclabel;
 
-gchar *actions[K_NUM];
+typedef enum {
+    PREFS_TAB_THEMES,
+    PREFS_TAB_PARTYLINE,
+    PREFS_TAB_KEYBOARD,
+    PREFS_TAB_SOUND,
+    PREFS_TAB_COUNT
+} T_prefs_tab;
+
+static int prefdialog_open;
+static T_prefs_tab prefs_tab;
 
 struct themelistentry {
     char dir[1024];
     char name[1024];
-} themes[64];
+};
 
-int themecount;
-int theme_select;
+#define MAX_THEMES 64
+static struct themelistentry themes[MAX_THEMES];
+static int themecount;
+static int theme_select;
+static char pref_theme_name[1024], pref_theme_author[1024], pref_theme_desc[1024];
 
-void prefdialog_destroy (void)
-{
-    gtk_widget_destroy (prefdialog);
-    prefdialog = NULL;
-}
+static int prefs_key_selected;
 
-void prefdialog_drawkeys (void)
-{
-    gchar *gconf_keys[K_NUM];
-    int i;
-    GtkTreeIter iter;
-    GtkListStore *keys_store = GTK_LIST_STORE (gtk_tree_view_get_model (GTK_TREE_VIEW (keyclist)));
+static SDL_Rect prefs_box;
+static SDL_Rect prefs_tab_rects[PREFS_TAB_COUNT];
+static SDL_Rect prefs_close_button;
+static SDL_Rect prefs_theme_rows[MAX_THEMES];
+static SDL_Rect prefs_timestamp_check, prefs_channellist_check;
+static SDL_Rect prefs_key_rows[K_NUM];
+static SDL_Rect prefs_changekey_button, prefs_restorekeys_button;
+static SDL_Rect prefs_sound_check;
 
-    actions[K_RIGHT]    = ("Move right");
-    actions[K_LEFT]     = ("Move left");
-    actions[K_DOWN]     = ("Move down");
-    actions[K_ROTRIGHT] = ("Rotate right");
-    actions[K_ROTLEFT]  = ("Rotate left");
-    actions[K_DROP]     = ("Drop piece");
-    actions[K_DISCARD]  = ("Discard special");
-    actions[K_GAMEMSG]  = ("Send message");
-    actions[K_SPECIAL1] = ("Special to field 1");
-    actions[K_SPECIAL2] = ("Special to field 2");
-    actions[K_SPECIAL3] = ("Special to field 3");
-    actions[K_SPECIAL4] = ("Special to field 4");
-    actions[K_SPECIAL5] = ("Special to field 5");
-    actions[K_SPECIAL6] = ("Special to field 6");
-  
-    gconf_keys[K_RIGHT]    = g_strdup ("right");
-    gconf_keys[K_LEFT]     = g_strdup ("left");
-    gconf_keys[K_DOWN]     = g_strdup ("down");
-    gconf_keys[K_ROTRIGHT] = g_strdup ("rotate-right");
-    gconf_keys[K_ROTLEFT]  = g_strdup ("rotate-left");
-    gconf_keys[K_DROP]     = g_strdup ("drop");
-    gconf_keys[K_DISCARD]  = g_strdup ("discard");
-    gconf_keys[K_GAMEMSG]  = g_strdup ("message");
-    gconf_keys[K_SPECIAL1] = g_strdup ("special1");
-    gconf_keys[K_SPECIAL2] = g_strdup ("special2");
-    gconf_keys[K_SPECIAL3] = g_strdup ("special3");
-    gconf_keys[K_SPECIAL4] = g_strdup ("special4");
-    gconf_keys[K_SPECIAL5] = g_strdup ("special5");
-    gconf_keys[K_SPECIAL6] = g_strdup ("special6");
+static const char *prefs_tab_names[PREFS_TAB_COUNT] = {
+    "Themes", "Partyline", "Keyboard", "Sound"
+};
 
-    for (i = 0; i < K_NUM; i ++) {
-        gtk_list_store_append (keys_store, &iter);
-        gtk_list_store_set (keys_store, &iter,
-                            0, actions[i],
-                            1, gdk_keyval_name (keys[i]),
-                            2, i,
-                            3, gconf_keys[i], -1);
-    }
-    
-    for (i = 0; i < K_NUM; i++) g_free (gconf_keys[i]);
-}
-
-void prefdialog_restorekeys (void)
-{
-    GtkTreeIter iter;
-    GtkListStore *keys_store = GTK_LIST_STORE (gtk_tree_view_get_model (GTK_TREE_VIEW (keyclist)));
-    gboolean valid;
-    gchar *gconf_key;
-    gint i;
-
-    valid = gtk_tree_model_get_iter_first (GTK_TREE_MODEL (keys_store), &iter);
-    while (valid)
-    {
-        gtk_tree_model_get (GTK_TREE_MODEL (keys_store), &iter, 2, &i, 3, &gconf_key, -1);
-        gtk_list_store_set (keys_store, &iter, 1, gdk_keyval_name (defaultkeys[i]), -1);
-        g_settings_set_string (settings_keys, gconf_key, gdk_keyval_name (defaultkeys[i]));
-        valid = gtk_tree_model_iter_next (GTK_TREE_MODEL (keys_store), &iter);
-        g_free (gconf_key);
-    }
-}
-
-void prefdialog_changekey (void)
-{
-    gchar buf[256], *key, *gconf_key;
-    gint k;
-    GtkListStore *keys_store = GTK_LIST_STORE (gtk_tree_view_get_model (GTK_TREE_VIEW (keyclist)));
-    GtkTreeSelection *selection = gtk_tree_view_get_selection (GTK_TREE_VIEW (keyclist));
-    GtkTreeIter selected_row;
-
-    if (!gtk_tree_selection_get_selected (selection, NULL, &selected_row)) return;
-
-    gtk_tree_model_get (GTK_TREE_MODEL (keys_store), &selected_row,
-                        0, &key, 3, &gconf_key, -1);
-    g_snprintf (buf, sizeof(buf), ("Press new key for \"%s\""), key);
-    k = key_dialog (buf);
-    if (k) {
-        gtk_list_store_set (keys_store, &selected_row, 1, gdk_keyval_name (k), -1);
-        g_settings_set_string (settings_keys, gconf_key, gdk_keyval_name (k));
-    }
-    
-    g_free (gconf_key);
-}
-
-void prefdialog_soundtoggle (GtkWidget *check)
-{
-    gboolean enabled;
-    enabled = gtk_toggle_button_get_active (GTK_TOGGLE_BUTTON (check));
-
-    g_settings_set_boolean (settings, "sound-enable", enabled);
-}
-
-void prefdialog_channeltoggle (GtkWidget *check)
-{
-    gboolean enabled;
-    enabled = gtk_toggle_button_get_active (GTK_TOGGLE_BUTTON (check));
-
-    g_settings_set_boolean (settings, "partyline-enable-channel-list", enabled);
-}
-
-void prefdialog_timestampstoggle (GtkWidget *check)
-{
-    gboolean enabled;
-    enabled = gtk_toggle_button_get_active (GTK_TOGGLE_BUTTON (check));
-
-    g_settings_set_boolean (settings, "partyline-enable-timestamps", enabled);
-}
-
-void prefdialog_themelistselect (int n)
-{
-    char author[1024], desc[1024];
-
-    /* update theme description */
-    config_getthemeinfo (themes[n].dir, NULL, author, desc);
-    leftlabel_set (namelabel, themes[n].name);
-    leftlabel_set (authlabel, author);
-    leftlabel_set (desclabel, desc);
-  
-    g_settings_set_string (settings_themes, "directory", themes[n].dir);
-}
-
-void prefdialog_themeselect (GtkTreeSelection *treeselection)
-{
-    GtkListStore *model;
-    GtkTreeIter iter;
-    gint row;
-  
-    if (gtk_tree_selection_get_selected (treeselection, NULL, &iter))
-    {
-      model = GTK_LIST_STORE (gtk_tree_view_get_model (gtk_tree_selection_get_tree_view (treeselection)));
-      gtk_tree_model_get (GTK_TREE_MODEL(model), &iter, 1, &row, -1);
-      prefdialog_themelistselect (row);
-    }
-}
-
-static int themelistcomp (const void *a1, const void *b1)
+static int
+themelistcomp (const void *a1, const void *b1)
 {
     const struct themelistentry *a = a1, *b = b1;
     return strcmp (a->name, b->name);
 }
 
-void prefdialog_themelist ()
+static void
+prefdialog_theme_select (int n)
+{
+    char author[1024], desc[1024];
+
+    if (n < 0 || n >= themecount)
+        return;
+    theme_select = n;
+    config_getthemeinfo (themes[n].dir, NULL, author, desc);
+    GTET_STRCPY (pref_theme_name, themes[n].name, sizeof (pref_theme_name));
+    GTET_STRCPY (pref_theme_author, author, sizeof (pref_theme_author));
+    GTET_STRCPY (pref_theme_desc, desc, sizeof (pref_theme_desc));
+
+    /* Matches the original: this only persists the choice for next
+       launch (config_loadconfig_themes() is what actually calls
+       load_theme()) -- switching themes doesn't re-skin the running
+       game live, upstream never wired that up either. */
+    config_set_theme_directory (themes[n].dir);
+}
+
+static void
+prefdialog_themelist_load (void)
 {
     DIR *d;
     struct dirent *de;
-    char str[1024], buf[1024];
+    char buf[1024];
     gchar *dir;
     int i;
     char *basedir[2];
-    GtkListStore *theme_store = GTK_LIST_STORE (gtk_tree_view_get_model (GTK_TREE_VIEW (themelist)));
-    GtkTreeSelection *theme_selection = gtk_tree_view_get_selection (GTK_TREE_VIEW (themelist));
-    GtkTreeIter iter, iter_selected;
+    int selected = 0;
 
     dir = g_build_filename (getenv ("HOME"), ".gtetrinet", "themes", NULL);
-
-    basedir[0] = dir; /* load users themes first ... in case we run out */
+    basedir[0] = dir;
     basedir[1] = GTETRINET_THEMES;
 
     themecount = 0;
-
-    for (i = 0; i < 2; i ++) {
+    for (i = 0; i < 2; i++) {
         d = opendir (basedir[i]);
-        if (d) {
-            while ((de = readdir(d))) {
-                GTET_O_STRCPY (buf, basedir[i]);
-                GTET_O_STRCAT (buf, "/");
-                GTET_O_STRCAT (buf, de->d_name);
-                GTET_O_STRCAT (buf, "/");
+        if (!d)
+            continue;
+        while ((de = readdir (d))) {
+            char str[1024];
 
-                if (config_getthemeinfo(buf, str, NULL, NULL) == 0) {
-                    GTET_O_STRCPY (themes[themecount].dir, buf);
-                    GTET_O_STRCPY (themes[themecount].name, str);
-                    themecount ++;
-                    if (themecount == (sizeof(themes) / sizeof(themes[0])))
-                    { /* FIXME: should be dynamic */
-                      g_warning("Too many theme files.\n");
-                      closedir (d);
-                      goto too_many_themes;
-                    }
+            GTET_O_STRCPY (buf, basedir[i]);
+            GTET_O_STRCAT (buf, "/");
+            GTET_O_STRCAT (buf, de->d_name);
+            GTET_O_STRCAT (buf, "/");
+
+            if (config_getthemeinfo (buf, str, NULL, NULL) == 0) {
+                GTET_O_STRCPY (themes[themecount].dir, buf);
+                GTET_O_STRCPY (themes[themecount].name, str);
+                themecount++;
+                if (themecount == MAX_THEMES) {
+                    closedir (d);
+                    goto too_many_themes;
                 }
             }
-            closedir (d);
         }
+        closedir (d);
     }
-    g_free (dir);
  too_many_themes:
-    qsort (themes, themecount, sizeof(struct themelistentry), themelistcomp);
+    g_free (dir);
+    qsort (themes, themecount, sizeof (struct themelistentry), themelistcomp);
 
-    theme_select = 0;
-    gtk_list_store_clear (theme_store);
-    for (i = 0; i < themecount; i ++) {
-        gtk_list_store_append (theme_store, &iter);
-        gtk_list_store_set (theme_store, &iter, 0, themes[i].name, 1, i, -1);
+    for (i = 0; i < themecount; i++)
         if (strcmp (themes[i].dir, currenttheme->str) == 0)
-        {
-            iter_selected = iter;
-            theme_select = i;
+            selected = i;
+
+    if (themecount > 0)
+        prefdialog_theme_select (selected);
+}
+
+void
+prefdialog_new (void)
+{
+    if (prefdialog_open)
+        return;
+    prefdialog_open = 1;
+    prefs_tab = PREFS_TAB_THEMES;
+    prefs_key_selected = 0;
+    prefdialog_themelist_load ();
+}
+
+static void
+prefdialog_close (void)
+{
+    prefdialog_open = 0;
+    keydialog_open = 0;
+}
+
+static void
+prefdialog_restorekeys (void)
+{
+    int i;
+
+    for (i = 0; i < K_NUM; i++)
+        config_set_key (i, defaultkeys[i]);
+}
+
+static void
+prefdialog_layout (const SDL_Rect *rect)
+{
+    int line_h = misc_font_line_height ();
+    int w = 480, h = 380;
+    int i, x, y;
+
+    prefs_box.x = rect->x + (rect->w - w) / 2;
+    prefs_box.y = rect->y + (rect->h - h) / 2;
+    prefs_box.w = w;
+    prefs_box.h = h;
+
+    x = prefs_box.x + DLG_PAD;
+    y = prefs_box.y + DLG_PAD + line_h + 8;
+    for (i = 0; i < PREFS_TAB_COUNT; i++) {
+        prefs_tab_rects[i].x = x;
+        prefs_tab_rects[i].y = y;
+        prefs_tab_rects[i].w = 100;
+        prefs_tab_rects[i].h = line_h + 6;
+        x += 104;
+    }
+
+    y += line_h + 14;
+
+    if (prefs_tab == PREFS_TAB_THEMES) {
+        int row_y = y;
+        for (i = 0; i < themecount && row_y + line_h <= prefs_box.y + h - 50; i++) {
+            prefs_theme_rows[i].x = prefs_box.x + DLG_PAD;
+            prefs_theme_rows[i].y = row_y;
+            prefs_theme_rows[i].w = 160;
+            prefs_theme_rows[i].h = line_h;
+            row_y += line_h;
         }
     }
-    if (theme_select != 0) 
-    {
-      gtk_tree_selection_select_iter (theme_selection, &iter_selected);
-      prefdialog_themelistselect (theme_select);
+    else if (prefs_tab == PREFS_TAB_PARTYLINE) {
+        prefs_timestamp_check.x = prefs_box.x + DLG_PAD;
+        prefs_timestamp_check.y = y;
+        prefs_timestamp_check.w = 14;
+        prefs_timestamp_check.h = 14;
+
+        prefs_channellist_check.x = prefs_box.x + DLG_PAD;
+        prefs_channellist_check.y = y + line_h + 12;
+        prefs_channellist_check.w = 14;
+        prefs_channellist_check.h = 14;
+    }
+    else if (prefs_tab == PREFS_TAB_KEYBOARD) {
+        int row_y = y;
+        for (i = 0; i < K_NUM && row_y + line_h <= prefs_box.y + h - 50; i++) {
+            prefs_key_rows[i].x = prefs_box.x + DLG_PAD;
+            prefs_key_rows[i].y = row_y;
+            prefs_key_rows[i].w = w - DLG_PAD * 2;
+            prefs_key_rows[i].h = line_h;
+            row_y += line_h;
+        }
+        prefs_changekey_button.w = 120;
+        prefs_changekey_button.h = line_h + 8;
+        prefs_changekey_button.x = prefs_box.x + DLG_PAD;
+        prefs_changekey_button.y = prefs_box.y + h - DLG_PAD - 40 - prefs_changekey_button.h;
+        prefs_restorekeys_button = prefs_changekey_button;
+        prefs_restorekeys_button.x += 130;
+    }
+    else if (prefs_tab == PREFS_TAB_SOUND) {
+        prefs_sound_check.x = prefs_box.x + DLG_PAD;
+        prefs_sound_check.y = y;
+        prefs_sound_check.w = 14;
+        prefs_sound_check.h = 14;
+    }
+
+    prefs_close_button.w = 80;
+    prefs_close_button.h = line_h + 8;
+    prefs_close_button.x = prefs_box.x + w - DLG_PAD - 80;
+    prefs_close_button.y = prefs_box.y + h - DLG_PAD - prefs_close_button.h;
+}
+
+static void
+prefdialog_render (SDL_Surface *dst, const SDL_Rect *rect)
+{
+    int line_h = misc_font_line_height ();
+    int i;
+
+    prefdialog_layout (rect);
+    draw_box (dst, &prefs_box, "GTetrinet Preferences");
+
+    for (i = 0; i < PREFS_TAB_COUNT; i++) {
+        int active = ((int) prefs_tab == i);
+        fill_box (dst, &prefs_tab_rects[i], active ? 55 : 38, active ? 55 : 38, active ? 55 : 38);
+        draw_border (dst, &prefs_tab_rects[i], 110, 110, 110);
+        draw_text (dst, prefs_tab_rects[i].x + 6, prefs_tab_rects[i].y + 3, prefs_tab_names[i], active);
+    }
+
+    if (prefs_tab == PREFS_TAB_THEMES) {
+        for (i = 0; i < themecount && i < MAX_THEMES; i++) {
+            if (prefs_theme_rows[i].w == 0)
+                break;
+            if (i == theme_select)
+                fill_box (dst, &prefs_theme_rows[i], 50, 50, 70);
+            draw_text (dst, prefs_theme_rows[i].x + 2, prefs_theme_rows[i].y, themes[i].name, 0);
+        }
+        {
+            int detail_x = prefs_box.x + DLG_PAD + 176;
+            int detail_y = prefs_theme_rows[0].y;
+            draw_text (dst, detail_x, detail_y, "Name:", 0);
+            draw_text (dst, detail_x + 90, detail_y, pref_theme_name, 0);
+            draw_text (dst, detail_x, detail_y + line_h + 4, "Author:", 0);
+            draw_text (dst, detail_x + 90, detail_y + line_h + 4, pref_theme_author, 0);
+            draw_text (dst, detail_x, detail_y + 2 * (line_h + 4), "Description:", 0);
+            draw_text (dst, detail_x + 90, detail_y + 2 * (line_h + 4), pref_theme_desc, 0);
+        }
+    }
+    else if (prefs_tab == PREFS_TAB_PARTYLINE) {
+        draw_checkbox (dst, &prefs_timestamp_check, "Enable Timestamps", timestampsenable);
+        draw_checkbox (dst, &prefs_channellist_check, "Enable Channel List", list_enabled);
+    }
+    else if (prefs_tab == PREFS_TAB_KEYBOARD) {
+        for (i = 0; i < K_NUM; i++) {
+            char buf[300];
+            const char *keyname = SDL_GetKeyName ((SDL_Keycode) keys[i]);
+
+            if (prefs_key_rows[i].w == 0)
+                break;
+            if (i == prefs_key_selected)
+                fill_box (dst, &prefs_key_rows[i], 50, 50, 70);
+            g_snprintf (buf, sizeof (buf), "%s: %s", key_action_names[i], keyname ? keyname : "?");
+            draw_text (dst, prefs_key_rows[i].x + 2, prefs_key_rows[i].y, buf, 0);
+        }
+        draw_button (dst, &prefs_changekey_button, "Change key...", 1);
+        draw_button (dst, &prefs_restorekeys_button, "Restore defaults", 1);
+    }
+    else if (prefs_tab == PREFS_TAB_SOUND) {
+        draw_checkbox (dst, &prefs_sound_check, "Enable Sound", soundenable);
+    }
+
+    draw_button (dst, &prefs_close_button, "Close", 1);
+}
+
+static void
+prefdialog_click (int x, int y)
+{
+    int i;
+
+    if (point_in_rect (x, y, &prefs_close_button)) { prefdialog_close (); return; }
+
+    for (i = 0; i < PREFS_TAB_COUNT; i++)
+        if (point_in_rect (x, y, &prefs_tab_rects[i])) { prefs_tab = (T_prefs_tab) i; return; }
+
+    if (prefs_tab == PREFS_TAB_THEMES) {
+        for (i = 0; i < themecount && i < MAX_THEMES; i++)
+            if (prefs_theme_rows[i].w != 0 && point_in_rect (x, y, &prefs_theme_rows[i])) {
+                prefdialog_theme_select (i);
+                return;
+            }
+    }
+    else if (prefs_tab == PREFS_TAB_PARTYLINE) {
+        if (point_in_rect (x, y, &prefs_timestamp_check)) {
+            timestampsenable = !timestampsenable;
+            config_set_timestamps_enable (timestampsenable);
+            return;
+        }
+        if (point_in_rect (x, y, &prefs_channellist_check)) {
+            partyline_show_channel_list (!list_enabled);
+            config_set_channel_list_enable (list_enabled);
+            return;
+        }
+    }
+    else if (prefs_tab == PREFS_TAB_KEYBOARD) {
+        for (i = 0; i < K_NUM; i++)
+            if (prefs_key_rows[i].w != 0 && point_in_rect (x, y, &prefs_key_rows[i])) {
+                prefs_key_selected = i;
+                return;
+            }
+        if (point_in_rect (x, y, &prefs_changekey_button)) { keydialog_start (prefs_key_selected); return; }
+        if (point_in_rect (x, y, &prefs_restorekeys_button)) { prefdialog_restorekeys (); return; }
+    }
+    else if (prefs_tab == PREFS_TAB_SOUND) {
+        if (point_in_rect (x, y, &prefs_sound_check)) {
+            soundenable = !soundenable;
+            config_set_sound_enable (soundenable);
+            return;
+        }
     }
 }
 
-void prefdialog_response (GtkDialog *dialog,
-                          gint arg1)
+static void
+prefdialog_keydown (int keycode)
 {
-
-  dialog = dialog;	/* Supress compile warning */
-
-  switch (arg1)
-  {
-    case GTK_RESPONSE_CLOSE: prefdialog_destroy (); break;
-    case GTK_RESPONSE_HELP:  /* here we should open yelp */ break;
-  }
+    if (keycode == SDLK_ESCAPE)
+        prefdialog_close ();
 }
 
-void prefdialog_new (void)
+/*****************/
+/* about dialog  */
+/*****************/
+
+static int aboutdialog_open;
+static SDL_Rect about_box, about_ok_button;
+
+void
+aboutdialog_new (void)
 {
-    GtkWidget *label, *table, *frame, *button, *button1, *widget, *table1, *divider, *notebook;
-    GtkWidget *themelist_scroll, *key_scroll, *url;
-    GtkWidget *channel_list_check;
-    GtkListStore *theme_store = gtk_list_store_new (2, G_TYPE_STRING, G_TYPE_INT);
-    GtkListStore *keys_store = gtk_list_store_new (4, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_INT, G_TYPE_STRING);
-    GtkCellRenderer *renderer = gtk_cell_renderer_text_new ();
-    GtkTreeSelection *theme_selection;
-  
-    if (prefdialog != NULL)
-    {
-      gtk_window_present (GTK_WINDOW (prefdialog));
-      return;
-    }
+    aboutdialog_open = 1;
+}
 
-    prefdialog = gtk_dialog_new_with_buttons (("GTetrinet Preferences"),
-                                              GTK_WINDOW (app),
-                                              0 | GTK_DIALOG_DESTROY_WITH_PARENT,
-                                              GTK_STOCK_HELP, GTK_RESPONSE_HELP,
-                                              GTK_STOCK_CLOSE, GTK_RESPONSE_CLOSE,
-                                              NULL);
-    notebook = gtk_notebook_new ();
-    gtk_window_set_resizable (GTK_WINDOW (prefdialog), FALSE);
+static void
+aboutdialog_close (void)
+{
+    aboutdialog_open = 0;
+}
 
-    /* themes */
-    themelist = gtk_tree_view_new_with_model (GTK_TREE_MODEL (theme_store));
-    themelist_scroll = gtk_scrolled_window_new (NULL, NULL);
-    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW (themelist_scroll),
-                                   GTK_POLICY_NEVER,
-                                   GTK_POLICY_AUTOMATIC);
-    gtk_container_add (GTK_CONTAINER(themelist_scroll), themelist);
-    theme_selection = gtk_tree_view_get_selection (GTK_TREE_VIEW (themelist));
-    gtk_tree_view_set_headers_visible (GTK_TREE_VIEW (themelist), FALSE);
-    gtk_widget_set_size_request (themelist, 160, 200);
-    gtk_tree_view_insert_column_with_attributes (GTK_TREE_VIEW (themelist), -1, "theme", renderer,
-                                                 "text", 0, NULL);
+static void
+aboutdialog_layout (const SDL_Rect *rect)
+{
+    int line_h = misc_font_line_height ();
+    int w = 360, h = 240;
 
-    label = leftlabel_new (("Select a theme from the list.\n"
-                             "Install new themes in ~/.gtetrinet/themes/"));
+    about_box.x = rect->x + (rect->w - w) / 2;
+    about_box.y = rect->y + (rect->h - h) / 2;
+    about_box.w = w;
+    about_box.h = h;
 
-    table1 = gtk_table_new (3, 2, FALSE);
-    gtk_container_set_border_width (GTK_CONTAINER(table1), GTET_PAD_SMALL);
-    gtk_table_set_row_spacings (GTK_TABLE(table1), 0);
-    gtk_table_set_col_spacings (GTK_TABLE(table1), GTET_PAD_SMALL);
-    widget = leftlabel_new (("Name:"));
-    gtk_table_attach (GTK_TABLE(table1), widget, 0, 1, 0, 1,
-                      GTK_EXPAND | GTK_FILL, 0, 0, 0);
-    widget = leftlabel_new (("Author:"));
-    gtk_table_attach (GTK_TABLE(table1), widget, 0, 1, 1, 2,
-                      GTK_EXPAND | GTK_FILL, 0, 0, 0);
-    widget = leftlabel_new (("Description:"));
-    gtk_table_attach (GTK_TABLE(table1), widget, 0, 1, 2, 3,
-                      GTK_EXPAND | GTK_FILL, 0, 0, 0);
-    namelabel = leftlabel_new ("");
-    gtk_table_attach (GTK_TABLE(table1), namelabel, 1, 2, 0, 1,
-                      GTK_EXPAND | GTK_FILL, GTK_FILL, 0, 0);
-    authlabel = leftlabel_new ("");
-    gtk_table_attach (GTK_TABLE(table1), authlabel, 1, 2, 1, 2,
-                      GTK_EXPAND | GTK_FILL, GTK_FILL, 0, 0);
-    desclabel = leftlabel_new ("");
-    gtk_table_attach (GTK_TABLE(table1), desclabel, 1, 2, 2, 3,
-                      GTK_EXPAND | GTK_FILL, GTK_FILL, 0, 0);
+    about_ok_button.w = 80;
+    about_ok_button.h = line_h + 8;
+    about_ok_button.x = about_box.x + (w - 80) / 2;
+    about_ok_button.y = about_box.y + h - DLG_PAD - about_ok_button.h;
+}
 
-    frame = gtk_frame_new (("Selected Theme"));
-    gtk_frame_set_shadow_type (GTK_FRAME(frame), GTK_SHADOW_IN);
-    gtk_container_set_border_width (GTK_CONTAINER(frame), GTET_PAD_SMALL);
-    gtk_widget_set_size_request (frame, 240, 100);
-    gtk_container_add (GTK_CONTAINER(frame), table1);
-    
-    table = gtk_table_new (3, 2, FALSE);
-    gtk_container_set_border_width (GTK_CONTAINER(table), GTET_PAD);
-    gtk_table_set_row_spacings (GTK_TABLE(table), GTET_PAD_SMALL);
-    gtk_table_set_col_spacings (GTK_TABLE(table), GTET_PAD_SMALL);
-    gtk_table_attach (GTK_TABLE(table), themelist_scroll, 0, 1, 0, 3,
-                      GTK_EXPAND | GTK_FILL, GTK_EXPAND | GTK_FILL, 0, 0);
-    gtk_table_attach (GTK_TABLE(table), label, 1, 2, 0, 1,
-                      GTK_EXPAND | GTK_FILL, GTK_FILL, 0, 0);
-    gtk_table_attach (GTK_TABLE(table), frame, 1, 2, 1, 2,
-                      GTK_EXPAND | GTK_FILL, GTK_EXPAND | GTK_FILL, 0, 0);
-    url = gtk_link_button_new_with_label ("http://gtetrinet.sourceforge.net/themes.html", ("Download new themes"));
-    gtk_table_attach (GTK_TABLE(table), url, 1, 2, 2, 3,
-                      GTK_EXPAND | GTK_FILL, GTK_EXPAND | GTK_SHRINK, 0, 0);
-    gtk_widget_show_all (table);
+static void
+aboutdialog_render (SDL_Surface *dst, const SDL_Rect *rect)
+{
+    int line_h = misc_font_line_height ();
+    int y;
 
-    label = gtk_label_new (("Themes"));
-    gtk_widget_show (label);
-    gtk_notebook_append_page (GTK_NOTEBOOK (notebook), table, label);
+    aboutdialog_layout (rect);
+    draw_box (dst, &about_box, "About GTetrinet");
 
-    /* partyline */
-    timestampcheck = gtk_check_button_new_with_mnemonic (_("Enable _Timestamps"));
-    gtk_widget_show(timestampcheck);
-    channel_list_check = gtk_check_button_new_with_mnemonic (("Enable Channel _List"));
-    gtk_widget_show (channel_list_check);
+    y = about_box.y + DLG_PAD + line_h + 10;
+    draw_text (dst, about_box.x + DLG_PAD, y, "GTetrinet " VERSION, 1); y += line_h + 4;
+    draw_text_muted (dst, about_box.x + DLG_PAD, y, "A Tetrinet client for GNOME."); y += line_h + 10;
+    draw_text_muted (dst, about_box.x + DLG_PAD, y, "Copyright 2004, 2005 Jordi Mallach, Dani Carbonell"); y += line_h + 2;
+    draw_text_muted (dst, about_box.x + DLG_PAD, y, "Copyright 1999-2003 Ka-shu Wong"); y += line_h + 10;
+    draw_text_muted (dst, about_box.x + DLG_PAD, y, "http://gtetrinet.sf.net");
 
-    frame = gtk_box_new (GTK_ORIENTATION_VERTICAL, 0);
-    gtk_box_pack_start (GTK_BOX(frame), timestampcheck, FALSE, FALSE, 0);
-    gtk_box_pack_start (GTK_BOX(frame), channel_list_check, FALSE, FALSE, 0);
-    gtk_widget_show (frame);
+    draw_button (dst, &about_ok_button, "OK", 1);
+}
 
-    gtk_toggle_button_set_active (GTK_TOGGLE_BUTTON(timestampcheck),
-                                  timestampsenable);
-    gtk_toggle_button_set_active (GTK_TOGGLE_BUTTON (channel_list_check),
-				  list_enabled);
+static void
+aboutdialog_click (int x, int y)
+{
+    if (point_in_rect (x, y, &about_ok_button))
+        aboutdialog_close ();
+}
 
-    g_signal_connect (G_OBJECT(timestampcheck), "toggled",
-                      G_CALLBACK(prefdialog_timestampstoggle), NULL);
-    g_signal_connect (G_OBJECT (channel_list_check), "toggled",
-		      G_CALLBACK (prefdialog_channeltoggle), NULL);
+static void
+aboutdialog_keydown (int keycode)
+{
+    if (keycode == SDLK_RETURN || keycode == SDLK_KP_ENTER || keycode == SDLK_ESCAPE)
+        aboutdialog_close ();
+}
 
-    table = gtk_table_new (3, 1, FALSE);
-    gtk_container_set_border_width (GTK_CONTAINER(table), GTET_PAD);
-    gtk_table_set_row_spacings (GTK_TABLE(table), GTET_PAD_SMALL);
-    gtk_table_set_col_spacings (GTK_TABLE(table), GTET_PAD_SMALL);
-    gtk_table_attach (GTK_TABLE(table), frame, 0, 1, 0, 1,
-                      GTK_EXPAND | GTK_FILL, 0, 0, 0);
-    gtk_widget_show (table);
+/* --- public API -------------------------------------------------------
+ * Priority when more than one flag is set (topmost first): the
+ * key-capture modal (nested inside Preferences), then the connecting-
+ * progress overlay (which can legitimately be open together with the
+ * connect dialog -- see dialogs.h), then whichever single main dialog
+ * is open. */
 
-    label = gtk_label_new (("Partyline"));
-    gtk_widget_show (label);
-    gtk_notebook_append_page (GTK_NOTEBOOK (notebook), table, label);
+int
+dialog_is_open (void)
+{
+    return connectdialog_open || connectingdialog_open || team_dialog_open ||
+           prefdialog_open || aboutdialog_open || keydialog_open;
+}
 
-    /* keyboard */
-    keyclist = GTK_WIDGET (gtk_tree_view_new_with_model (GTK_TREE_MODEL(keys_store)));
-    key_scroll = gtk_scrolled_window_new (NULL, NULL);
-    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW (key_scroll),
-                                   GTK_POLICY_AUTOMATIC,
-                                   GTK_POLICY_AUTOMATIC);
-    gtk_container_add (GTK_CONTAINER(key_scroll), keyclist);
-    gtk_tree_view_insert_column_with_attributes (GTK_TREE_VIEW (keyclist), -1, ("Action"), renderer,
-                                                 "text", 0, NULL);
-    gtk_tree_view_insert_column_with_attributes (GTK_TREE_VIEW (keyclist), -1, ("Key"), renderer,
-                                                 "text", 1, NULL);
+void
+dialog_render (SDL_Surface *dst, const SDL_Rect *rect)
+{
+    if (!dialog_is_open ())
+        return;
 
-    gtk_widget_set_size_request (key_scroll, 240, 200);
-    gtk_widget_show (key_scroll);
+    fill_box (dst, rect, 10, 10, 10);
 
-    label = gtk_label_new (("Select an action from the list and press Change "
-                             "Key to change the key associated with the action."));
-    gtk_label_set_justify (GTK_LABEL(label), GTK_JUSTIFY_LEFT);
-    gtk_label_set_line_wrap (GTK_LABEL(label), TRUE);
-    gtk_widget_show (label);
-    gtk_widget_set_size_request (label, 180, 100);
+    if (connectdialog_open)
+        connectdialog_render (dst, rect);
+    else if (team_dialog_open)
+        teamdialog_render (dst, rect);
+    else if (prefdialog_open)
+        prefdialog_render (dst, rect);
+    else if (aboutdialog_open)
+        aboutdialog_render (dst, rect);
 
-    button = gtk_button_new_with_mnemonic (("Change _key..."));
-    g_signal_connect (G_OBJECT(button), "clicked",
-                      G_CALLBACK (prefdialog_changekey), NULL);
-    gtk_widget_show (button);
+    if (connectingdialog_open)
+        connectingdialog_render (dst, rect);
 
-    button1 = gtk_button_new_with_mnemonic (("_Restore defaults"));
-    g_signal_connect (G_OBJECT(button1), "clicked",
-                      G_CALLBACK (prefdialog_restorekeys), NULL);
-    gtk_widget_show (button1);
+    if (keydialog_open)
+        keydialog_render (dst, rect);
+}
 
-    table = gtk_table_new (2, 2, FALSE);
-    gtk_container_set_border_width (GTK_CONTAINER(table), GTET_PAD);
-    gtk_table_set_row_spacings (GTK_TABLE(table), GTET_PAD_SMALL);
-    gtk_table_set_col_spacings (GTK_TABLE(table), GTET_PAD_SMALL);
-    gtk_table_attach (GTK_TABLE(table), key_scroll, 0, 1, 0, 2,
-                      GTK_FILL, GTK_FILL, 0, 0);
-    gtk_table_attach (GTK_TABLE(table), label, 1, 2, 0, 1,
-                      GTK_FILL, 0, 0, 0);
-    frame = gtk_box_new (GTK_ORIENTATION_VERTICAL, GTET_PAD_SMALL);
-    gtk_box_pack_end (GTK_BOX(frame), button1, FALSE, FALSE, 0);
-    gtk_box_pack_end (GTK_BOX(frame), button, FALSE, FALSE, 0);
-    gtk_widget_show (frame);
-    gtk_table_attach (GTK_TABLE(table), frame, 1, 2, 1, 2,
-                      GTK_FILL, GTK_EXPAND | GTK_FILL, 0, 0);
-    gtk_widget_show (table);
+void
+dialog_textinput (const char *text)
+{
+    if (keydialog_open || connectingdialog_open)
+        return;
+    if (connectdialog_open)
+        connectdialog_textinput (text);
+    else if (team_dialog_open)
+        teamdialog_textinput (text);
+}
 
-    label = gtk_label_new (("Keyboard"));
-    gtk_widget_show (label);
-    gtk_notebook_append_page (GTK_NOTEBOOK (notebook), table, label);
+void
+dialog_backspace (void)
+{
+    if (keydialog_open || connectingdialog_open)
+        return;
+    if (connectdialog_open)
+        connectdialog_backspace ();
+    else if (team_dialog_open)
+        teamdialog_backspace ();
+}
 
-    /* sound */
-    soundcheck = gtk_check_button_new_with_mnemonic (("Enable _Sound"));
-    gtk_widget_show (soundcheck);
+void
+dialog_keydown (int keycode)
+{
+    if (keydialog_open) { keydialog_keydown (keycode); return; }
+    if (connectingdialog_open) return; /* only Cancel, mouse-only */
+    if (connectdialog_open) { connectdialog_keydown (keycode); return; }
+    if (team_dialog_open) { teamdialog_keydown (keycode); return; }
+    if (prefdialog_open) { prefdialog_keydown (keycode); return; }
+    if (aboutdialog_open) { aboutdialog_keydown (keycode); return; }
+}
 
-    frame = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 0);
-    gtk_box_pack_start (GTK_BOX(frame), soundcheck, FALSE, FALSE, 0);
-    gtk_widget_show (frame);
+void
+dialog_click (int x, int y)
+{
+    if (keydialog_open) { keydialog_click (x, y); return; }
+    if (connectingdialog_open) { connectingdialog_click (x, y); return; }
+    if (connectdialog_open) { connectdialog_click (x, y); return; }
+    if (team_dialog_open) { teamdialog_click (x, y); return; }
+    if (prefdialog_open) { prefdialog_click (x, y); return; }
+    if (aboutdialog_open) { aboutdialog_click (x, y); return; }
+}
 
-    divider = gtk_separator_new (GTK_ORIENTATION_HORIZONTAL);
-    gtk_widget_show (divider);
-
-    table = gtk_table_new (3, 1, FALSE);
-    gtk_container_set_border_width (GTK_CONTAINER(table), GTET_PAD);
-    gtk_table_set_row_spacings (GTK_TABLE(table), GTET_PAD_SMALL);
-    gtk_table_set_col_spacings (GTK_TABLE(table), GTET_PAD_SMALL);
-    gtk_table_attach (GTK_TABLE(table), frame, 0, 1, 0, 1,
-                      GTK_EXPAND | GTK_FILL, 0, 0, 0);
-    gtk_table_attach (GTK_TABLE(table), divider, 0, 1, 1, 2,
-                      GTK_EXPAND | GTK_FILL, 0, 0, GTET_PAD_SMALL);
-    gtk_widget_show (table);
-
-    label = gtk_label_new (("Sound"));
-    gtk_widget_show (label);
-    gtk_notebook_append_page (GTK_NOTEBOOK (notebook), table, label);
-
-    /* init stuff */
-    prefdialog_themelist ();
-
-    prefdialog_drawkeys ();
-
-    gtk_toggle_button_set_active (GTK_TOGGLE_BUTTON(soundcheck), soundenable);
-
-#ifndef HAVE_CANBERRAGTK
-    gtk_widget_set_sensitive (soundcheck, FALSE);
-#endif
-    
-//    gtk_box_set_spacing (GTK_BOX (GTK_DIALOG (prefdialog)->action_area), 6);
-    gtk_box_pack_start (GTK_BOX (gtk_dialog_get_content_area(prefdialog)), notebook, FALSE, FALSE, 0);
-
-    g_signal_connect (G_OBJECT(soundcheck), "toggled",
-                      G_CALLBACK(prefdialog_soundtoggle), NULL);
-    g_signal_connect (G_OBJECT(theme_selection), "changed",
-                      G_CALLBACK (prefdialog_themeselect), NULL);
-    g_signal_connect (G_OBJECT(prefdialog), "destroy",
-                      G_CALLBACK(prefdialog_destroy), NULL);
-    g_signal_connect (G_OBJECT(prefdialog), "response",
-                      G_CALLBACK(prefdialog_response), NULL);
-    gtk_widget_show_all (prefdialog);
+void
+dialog_tick (void)
+{
+    connectingdialog_tick ();
 }
