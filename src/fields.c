@@ -401,7 +401,7 @@ render_labels (SDL_Surface *dst)
     int line_h = misc_font_line_height ();
     char buf[160];
 
-    style.color.r = style.color.g = style.color.b = 0xFF; style.color.a = 0xFF;
+    style.color.r = style.color.g = style.color.b = 0xFF;
     style.bold = style.italic = style.underline = 0;
 
     g_snprintf (buf, sizeof (buf), "Lines: %s", linestext);
@@ -425,7 +425,7 @@ render_fieldlabel (SDL_Surface *dst, int field, const SDL_Rect *rect)
     T_textstyle style;
     char buf[160];
 
-    style.color.r = style.color.g = style.color.b = 0xFF; style.color.a = 0xFF;
+    style.color.r = style.color.g = style.color.b = 0xFF;
     style.bold = style.italic = style.underline = 0;
 
     if (!fieldhasname[field]) {
@@ -508,7 +508,7 @@ render_gmsginput (SDL_Surface *dst)
 
     SDL_FillRect (dst, &r, SDL_MapRGB (dst->format, 32, 32, 32));
 
-    style.color.r = style.color.g = style.color.b = 0xFF; style.color.a = 0xFF;
+    style.color.r = style.color.g = style.color.b = 0xFF;
     style.bold = style.italic = style.underline = 0;
     misc_font_render (dst, r.x + 2, r.y + 2, &style, gmsginput_buf, (size_t) gmsginput_len);
 }

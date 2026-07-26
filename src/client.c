@@ -43,6 +43,15 @@
 #include "gtetrinet.h"
 #include "sched.h"
 
+/* IRIX 6.5's own <stdio.h> predates C99 and never declares snprintf at
+   all (not even behind a feature-test macro) despite libc actually
+   providing a working symbol for it -- confirmed by grepping the real
+   system header on the O2. __sgi is GCC's standard predefined macro for
+   this target. */
+#if defined(__sgi)
+extern int snprintf (char *str, size_t size, const char *format, ...);
+#endif
+
 #define PORT 31457
 #define SPECPORT 31458
 

@@ -236,7 +236,7 @@ render_menubar (SDL_Surface *dst)
     int i;
 
     style.color.r = style.color.g = style.color.b = 0xFF;
-    style.color.a = 0xFF;
+   
     style.bold = style.italic = style.underline = 0;
 
     SDL_FillRect (dst, &menubar_rect, SDL_MapRGB (dst->format, 24, 24, 24));
@@ -276,7 +276,7 @@ render_tabbar (SDL_Surface *dst)
     int i;
 
     style.color.r = style.color.g = style.color.b = 0xFF;
-    style.color.a = 0xFF;
+   
     style.bold = style.italic = style.underline = 0;
 
     for (i = 0; i < PAGE_COUNT; i++) {
@@ -471,7 +471,14 @@ main (int argc, char *argv[])
         fprintf (stderr, "SDL_Init failed: %s\n", SDL_GetError ());
         return 1;
     }
+#ifdef IMG_INIT_PNG
+    /* IMG_Init()/IMG_INIT_PNG were added in SDL_image 1.2.11 (2012);
+       Nekoware's IRIX package predates that -- IMG_Load() there (and on
+       every other SDL_image version) auto-detects format and works
+       fine without ever calling IMG_Init() explicitly, so this is a
+       pure optimization, safe to skip entirely when unavailable. */
     IMG_Init (IMG_INIT_PNG);
+#endif
 #if SDL_MAJOR_VERSION >= 2
     SDL_StartTextInput ();
 #else

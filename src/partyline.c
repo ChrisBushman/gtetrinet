@@ -524,7 +524,7 @@ render_label (SDL_Surface *dst, int x, int y, const char *text)
 {
     T_textstyle style;
 
-    style.color.r = style.color.g = style.color.b = 0xFF; style.color.a = 0xFF;
+    style.color.r = style.color.g = style.color.b = 0xFF;
     style.bold = style.italic = style.underline = 0;
     misc_font_render (dst, x, y, &style, text, strlen (text));
 }
@@ -534,7 +534,7 @@ render_label_bold (SDL_Surface *dst, int x, int y, const char *text)
 {
     T_textstyle style;
 
-    style.color.r = style.color.g = style.color.b = 0xFF; style.color.a = 0xFF;
+    style.color.r = style.color.g = style.color.b = 0xFF;
     style.bold = 1; style.italic = style.underline = 0;
     misc_font_render (dst, x, y, &style, text, strlen (text));
 }

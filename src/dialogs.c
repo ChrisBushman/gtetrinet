@@ -46,7 +46,10 @@ extern int gamemode;
 static void
 fill_box (SDL_Surface *dst, const SDL_Rect *r, Uint8 gr, Uint8 gg, Uint8 gb)
 {
-    SDL_FillRect (dst, r, SDL_MapRGB (dst->format, gr, gg, gb));
+    /* Real SDL 1.2's SDL_FillRect() takes a non-const SDL_Rect* (SDL2's
+       is const-correct) -- it never writes through the pointer in
+       either version, so casting the qualifier away here is safe. */
+    SDL_FillRect (dst, (SDL_Rect *) r, SDL_MapRGB (dst->format, gr, gg, gb));
 }
 
 static void
@@ -68,7 +71,7 @@ draw_text (SDL_Surface *dst, int x, int y, const char *text, int bold)
 {
     T_textstyle style;
     style.color.r = style.color.g = style.color.b = 0xFF;
-    style.color.a = 0xFF;
+   
     style.bold = bold;
     style.italic = style.underline = 0;
     misc_font_render (dst, x, y, &style, text, strlen (text));
@@ -79,7 +82,7 @@ draw_text_muted (SDL_Surface *dst, int x, int y, const char *text)
 {
     T_textstyle style;
     style.color.r = style.color.g = style.color.b = 0xA0;
-    style.color.a = 0xFF;
+   
     style.bold = style.italic = style.underline = 0;
     misc_font_render (dst, x, y, &style, text, strlen (text));
 }
@@ -89,7 +92,7 @@ draw_text_error (SDL_Surface *dst, int x, int y, const char *text)
 {
     T_textstyle style;
     style.color.r = 0xFF; style.color.g = 0x60; style.color.b = 0x60;
-    style.color.a = 0xFF;
+   
     style.bold = style.italic = style.underline = 0;
     misc_font_render (dst, x, y, &style, text, strlen (text));
 }
@@ -961,7 +964,12 @@ prefdialog_render (SDL_Surface *dst, const SDL_Rect *rect)
     else if (prefs_tab == PREFS_TAB_KEYBOARD) {
         for (i = 0; i < K_NUM; i++) {
             char buf[300];
-            const char *keyname = SDL_GetKeyName ((SDL_Keycode) keys[i]);
+            /* No cast: SDL_GetKeyName() takes SDL_Keycode on SDL2 but
+               SDLKey on real SDL 1.2 -- keys[i] is already a plain int
+               (see gtet_config.h), which converts implicitly to either,
+               but naming SDL2-only "SDL_Keycode" here would break the
+               SDL 1.2 build. */
+            const char *keyname = SDL_GetKeyName (keys[i]);
 
             if (prefs_key_rows[i].w == 0)
                 break;

@@ -97,7 +97,7 @@ void winlist_render (SDL_Surface *dst, const SDL_Rect *rect)
     int y = rect->y;
     char scorebuf[32];
 
-    style.color.r = style.color.g = style.color.b = 0xFF; style.color.a = 0xFF;
+    style.color.r = style.color.g = style.color.b = 0xFF;
     style.bold = style.italic = style.underline = 0;
 
     for (i = 0; i < item_count && y + row_h <= rect->y + rect->h; i++) {
