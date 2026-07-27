@@ -21,6 +21,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#if defined(__sgi)
+#include <unistd.h>
+#endif
 #include <glib.h>
 #include <SDL.h>
 #include <SDL_image.h>
@@ -460,24 +463,32 @@ route_textinput (const char *text)
  * frame where nothing could plausibly have changed, not in rendering
  * faster.
  *
- * Deliberately coarse rather than a true per-widget dirty-rect system:
- * "something happened this frame" (an input event) or "we're in a
- * state where anything could be changing on its own" (connected to a
- * server, a game in progress, typing a game message, or a dialog open)
- * are each treated as "just redraw", the same as every frame did
- * before this existed. That's far cheaper to reason about and much
- * lower-risk than instrumenting every individual state mutator across
- * fields.c/partyline.c/dialogs.c/winlist.c/commands.c/config.c (dozens
- * of call sites -- miss one and the screen silently stops updating);
- * it only forgoes skipping frames in cases (an event that turns out to
- * change nothing) that don't matter for the actual problem being
- * fixed, which is CPU burned redrawing a genuinely idle menu screen. */
+ * This used to also treat "we're in a state where anything could be
+ * changing on its own" (connected, ingame, or typing a game message) as
+ * an unconditional redraw -- deliberately coarse, since auditing every
+ * individual state mutator across fields.c/partyline.c/dialogs.c/
+ * winlist.c/commands.c/config.c to know exactly when something visible
+ * changed looked like dozens of call sites and an easy one to miss.
+ * But that meant every single frame rendered (up to 30fps) for the
+ * entire time a player was connected, which is most of a session --
+ * the flag barely gated anything in the case that actually matters.
+ *
+ * tick_fired and socket_activity close that gap without the broad
+ * audit: every timer-driven visual change in this app (fall step,
+ * line-clear, partyline refresh -- see sched.c callers) goes through
+ * sched_timeout_add(), so sched_tick()'s return value already says
+ * "something timer-driven might have changed"; every server-driven
+ * change (opponent moves, chat, stats) arrives through
+ * client_poll_socket()'s single dispatch path. Between those two and
+ * had_event (local input), the only remaining unconditional case is
+ * dialog_is_open() -- the connecting-dialog's progress pulse animates
+ * on a wall-clock timer of its own (see connectingdialog_tick()), not
+ * through sched.c, so it still needs an unconditional redraw while any
+ * dialog is up. */
 static int
-should_render (int had_event)
+should_render (int had_event, int tick_fired, int socket_activity)
 {
-    if (had_event)
-        return 1;
-    if (connected || ingame || gmsgstate)
+    if (had_event || tick_fired || socket_activity)
         return 1;
     if (dialog_is_open ())
         return 1;
@@ -637,17 +648,34 @@ main (int argc, char *argv[])
             }
         }
 
-        sched_tick ();
-        client_poll_connect ();
-        client_poll_socket ();
-        dialog_tick ();
+        {
+            int tick_fired = sched_tick ();
+            int socket_activity;
 
-        if (should_render (had_event))
-            render_frame ();
+            client_poll_connect ();
+            socket_activity = client_poll_socket ();
+            dialog_tick ();
+
+            if (should_render (had_event, tick_fired, socket_activity))
+                render_frame ();
+        }
 
         now = SDL_GetTicks ();
-        if (now - last_tick < FRAME_INTERVAL_MS)
+        if (now - last_tick < FRAME_INTERVAL_MS) {
+#if defined(__sgi)
+            /* This SDL 1.2 build's SDL_Delay() busy-waits on real IRIX
+               instead of yielding the CPU (confirmed on real O2 hardware)
+               -- every main-loop iteration was burning a full CPU-time
+               slice for the whole FRAME_INTERVAL_MS regardless of
+               should_render()'s decision, since the "delay" never
+               actually blocked. usleep() is a real libc/kernel sleep on
+               IRIX and isn't affected by this SDL bug, so use it
+               directly here instead of going through SDL_Delay(). */
+            usleep ((useconds_t) (FRAME_INTERVAL_MS - (now - last_tick)) * 1000);
+#else
             SDL_Delay (FRAME_INTERVAL_MS - (now - last_tick));
+#endif
+        }
         last_tick = SDL_GetTicks ();
     }
 

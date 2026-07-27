@@ -42,8 +42,12 @@ void sched_timer_remove (unsigned int id);
    timer whose deadline has passed. If a timer's callback returns nonzero,
    it is rescheduled for interval_ms after its *previous* deadline (not
    after "now"), so a busy frame doesn't drift the cadence -- matching
-   GLib's own catch-up behavior for GSourceFunc timeouts. */
-void sched_tick (void);
+   GLib's own catch-up behavior for GSourceFunc timeouts. Returns nonzero
+   if at least one timer fired this call -- the main loop uses this to
+   decide whether anything timer-driven (fall step, line-clear, partyline
+   refresh) could have changed what's on screen, without re-rendering on
+   every single frame regardless of whether anything actually happened. */
+int sched_tick (void);
 
 /* Remove every pending timer. Call at disconnect/game-end so stale
    timers (e.g. a fall-speed timer from a game that just ended) can't

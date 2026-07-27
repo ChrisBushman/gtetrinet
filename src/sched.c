@@ -68,11 +68,12 @@ sched_remove_all (void)
     timers_count = 0;
 }
 
-void
+int
 sched_tick (void)
 {
     Uint32 now;
     int i;
+    int fired = 0;
 
     /* Iterate by index, not a cached pointer/count: a callback may itself
        call sched_timeout_add() (tetrinet_nextblocktimeout does exactly
@@ -104,6 +105,7 @@ sched_tick (void)
            may move the base address, so the index itself stays valid. */
         func = timers[i].func;
         data = timers[i].data;
+        fired = 1;
 
         if (func (data)) {
             /* Reschedule from the previous deadline, not "now", so a
@@ -131,4 +133,6 @@ sched_tick (void)
         }
         timers_count = write;
     }
+
+    return fired;
 }

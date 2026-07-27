@@ -42,9 +42,12 @@ extern int app_mainloop_running;
    safe to call unconditionally (no-ops when nothing is pending/connected).
    client_poll_connect() drives the non-blocking hostname-resolve/connect
    sequence client_init() kicks off; client_poll_socket() replaces the
-   old GIOChannel watch for incoming server data once connected. */
+   old GIOChannel watch for incoming server data once connected. Returns
+   nonzero if a server message was actually read+dispatched this call --
+   the main loop uses this to know whether anything the server sent
+   (opponent moves, chat, stats) could have changed what's on screen. */
 extern void client_poll_connect (void);
-extern void client_poll_socket (void);
+extern int client_poll_socket (void);
 
 /* for sending stuff back and forth */
 extern void client_outmessage (enum outmsg_type msgtype, char *str);

@@ -34,7 +34,15 @@ static Mix_Music *music = NULL;
 
 int sound_init (void)
 {
-    if (Mix_OpenAudio (44100, MIX_DEFAULT_FORMAT, 2, 1024) != 0) {
+    /* 22050 Hz mono, not the default 44100/stereo -- the MIDI theme is
+       played through SDL_mixer's compiled-in Timidity software synth
+       (see config.c/sound.h), and Timidity's synthesis + resample cost
+       scales with output rate and channel count. On real IRIX/O2 this
+       was competing with rendering for the same slow MIPS CPU; halving
+       the rate and dropping to mono cuts that cost by roughly 4x with
+       no perceptible quality loss for simple WAV sound effects + one
+       background MIDI track. */
+    if (Mix_OpenAudio (22050, MIX_DEFAULT_FORMAT, 1, 1024) != 0) {
         fprintf (stderr, "sound_init: Mix_OpenAudio failed: %s (sound disabled)\n", Mix_GetError ());
         mixer_ready = 0;
         return -1;

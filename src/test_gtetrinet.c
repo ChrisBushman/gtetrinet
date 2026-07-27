@@ -47,7 +47,7 @@ void client_init (const char *s G_GNUC_UNUSED, const char *n G_GNUC_UNUSED) { cl
 int client_disconnect_calls;
 void client_disconnect (void) { client_disconnect_calls++; }
 void client_poll_connect (void) {}
-void client_poll_socket (void) {}
+int client_poll_socket (void) { return 0; }
 int client_outmessage_calls;
 enum outmsg_type client_outmessage_last_type;
 char client_outmessage_last_str[512];

@@ -441,14 +441,14 @@ void client_disconnect (void)
    this does exactly what io_channel_cb() used to do. Safe to call
    unconditionally every frame -- it's a no-op while the socket isn't
    open. */
-void client_poll_socket (void)
+int client_poll_socket (void)
 {
   fd_set readfds;
   struct timeval tv;
   gchar *buf;
 
   if (!socket_open)
-    return;
+    return 0;
 
   FD_ZERO (&readfds);
   FD_SET (sock, &readfds);
@@ -456,9 +456,9 @@ void client_poll_socket (void)
   tv.tv_usec = 0;
 
   if (select (sock + 1, &readfds, NULL, NULL, &tv) <= 0)
-    return;
+    return 0;
   if (!FD_ISSET (sock, &readfds))
-    return;
+    return 0;
 
   if (client_readmsg (&buf) < 0)
   {
@@ -476,6 +476,7 @@ void client_poll_socket (void)
     }
     g_free (buf);
   }
+  return 1;
 }
 
 int client_sendmsg (char *str)
