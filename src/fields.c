@@ -238,31 +238,35 @@ static void
 render_field (SDL_Surface *dst, int field, const SDL_Rect *rect)
 {
     int x, y, srcx, srcy, destx, desty, blocksize;
+    int bg_base_x;
     char block;
 
     blocksize = (field == 0) ? BLOCKSIZE : SMALLBLOCKSIZE;
+    bg_base_x = (field == 0) ? 0 : BLOCKSIZE * FIELDWIDTH;
+
+    /* The empty-cell ("block == 0") source region for every (x,y) in
+     * this field is srcx = bg_base_x + blocksize*x, srcy = BLOCKSIZE +
+     * SMALLBLOCKSIZE + blocksize*y -- i.e. one contiguous
+     * (FIELDWIDTH*blocksize) x (FIELDHEIGHT*blocksize) rectangle in the
+     * tileset, not FIELDWIDTH*FIELDHEIGHT independent tiles. Blitting
+     * it as a single call instead of looping blit_tile() 12*22 = 264
+     * times per field (mostly for cells that are just background
+     * anyway) is the difference between ~1584 and ~6 blits/frame for 6
+     * empty fields -- SDL_BlitSurface's fixed per-call overhead
+     * (clipping/rect setup) dominates over the actual pixel copy for
+     * tiles this small on hardware with no blit acceleration (real
+     * IRIX/O2), so call count matters far more than total pixel area. */
+    blit_tile (dst, bg_base_x, BLOCKSIZE + SMALLBLOCKSIZE, rect->x, rect->y,
+               blocksize * FIELDWIDTH, blocksize * FIELDHEIGHT);
 
     for (y = 0; y < FIELDHEIGHT; y++) {
         for (x = 0; x < FIELDWIDTH; x++) {
             block = displayfields[field][y][x];
+            if (block == 0)
+                continue; /* already covered by the background blit above */
 
-            if (field == 0) {
-                if (block == 0) {
-                    srcx = blocksize * x;
-                    srcy = BLOCKSIZE + SMALLBLOCKSIZE + blocksize * y;
-                } else {
-                    srcx = (block - 1) * blocksize;
-                    srcy = 0;
-                }
-            } else {
-                if (block == 0) {
-                    srcx = BLOCKSIZE * FIELDWIDTH + blocksize * x;
-                    srcy = BLOCKSIZE + SMALLBLOCKSIZE + blocksize * y;
-                } else {
-                    srcx = (block - 1) * blocksize;
-                    srcy = BLOCKSIZE;
-                }
-            }
+            srcx = (block - 1) * blocksize;
+            srcy = (field == 0) ? 0 : BLOCKSIZE;
             destx = rect->x + blocksize * x;
             desty = rect->y + blocksize * y;
 
