@@ -197,16 +197,117 @@ gchar* ensure_utf8(const char* str) {
 
 static TTF_Font *font = NULL;
 
+/* --- rendered-text cache ---------------------------------------------
+ * Almost every visible string (menu items, tab labels, field names,
+ * Lines:/Level:, chat log history, ...) is re-rasterized via
+ * TTF_RenderUTF8_Blended() from scratch on every single call to
+ * misc_font_render() -- and every render_*() function in this port
+ * calls it again every frame, even for text that hasn't changed since
+ * the last one. FreeType rasterization is comparatively expensive, and
+ * on hardware with no blit acceleration (real IRIX/O2) this was a
+ * meaningful chunk of why the client felt slow, on top of the tile-blit
+ * cost fields.c already addresses separately.
+ *
+ * A small fixed-size, round-robin cache keyed on (text, color, bold,
+ * italic, underline) turns repeated calls for the same string+style
+ * into a plain SDL_BlitSurface of an already-rendered surface. Not a
+ * real LRU -- just "evict the oldest slot" -- which is enough given how
+ * few *distinct* strings are ever on screen at once (tens, not
+ * thousands); a cache miss just falls back to rendering fresh, same as
+ * before this existed. */
+#define TEXT_CACHE_SIZE 128
+#define TEXT_CACHE_MAXLEN 255
+
+typedef struct {
+    char text[TEXT_CACHE_MAXLEN + 1];
+    SDL_Color color;
+    int bold, italic, underline;
+    SDL_Surface *surface;
+    int in_use;
+} T_text_cache_entry;
+
+static T_text_cache_entry text_cache[TEXT_CACHE_SIZE];
+static int text_cache_next;
+
+static void
+text_cache_clear (void)
+{
+    int i;
+    for (i = 0; i < TEXT_CACHE_SIZE; i++) {
+        if (text_cache[i].surface)
+            SDL_FreeSurface (text_cache[i].surface);
+    }
+    memset (text_cache, 0, sizeof (text_cache));
+    text_cache_next = 0;
+}
+
+static int
+text_cache_style_matches (const T_text_cache_entry *e, const T_textstyle *style)
+{
+    return e->color.r == style->color.r && e->color.g == style->color.g &&
+           e->color.b == style->color.b &&
+           e->bold == style->bold && e->italic == style->italic &&
+           e->underline == style->underline;
+    /* Deliberately not comparing color.a: most callers this port over
+       leave it unset (TTF_RenderUTF8_Blended() never reads it in either
+       SDL_ttf version -- glyph alpha comes from anti-aliasing, not the
+       input color -- and real SDL 1.2's SDL_Color has no .a field at
+       all), so it can hold indeterminate stack garbage that would
+       otherwise cause spurious cache misses. */
+}
+
+static SDL_Surface *
+text_cache_lookup (const char *text, const T_textstyle *style)
+{
+    int i;
+    for (i = 0; i < TEXT_CACHE_SIZE; i++)
+        if (text_cache[i].in_use &&
+            text_cache_style_matches (&text_cache[i], style) &&
+            strcmp (text_cache[i].text, text) == 0)
+            return text_cache[i].surface;
+    return NULL;
+}
+
+/* Always takes ownership of `surface` -- either stores it in the cache
+   (freeing whatever it evicts) or, if `text` is too long to cache,
+   frees `surface` itself. Callers never need to free it. */
+static void
+text_cache_insert (const char *text, const T_textstyle *style, SDL_Surface *surface)
+{
+    T_text_cache_entry *e;
+
+    if (strlen (text) > TEXT_CACHE_MAXLEN) {
+        SDL_FreeSurface (surface);
+        return;
+    }
+
+    e = &text_cache[text_cache_next];
+    text_cache_next = (text_cache_next + 1) % TEXT_CACHE_SIZE;
+
+    if (e->surface)
+        SDL_FreeSurface (e->surface);
+
+    GTET_STRCPY (e->text, text, sizeof (e->text));
+    e->color = style->color;
+    e->bold = style->bold;
+    e->italic = style->italic;
+    e->underline = style->underline;
+    e->surface = surface;
+    e->in_use = 1;
+}
+
 int misc_font_init (const char *font_path, int size_px)
 {
     if (TTF_Init () != 0)
         return -1;
     font = TTF_OpenFont (font_path, size_px);
+    text_cache_clear ();
     return font ? 0 : -1;
 }
 
 void misc_font_cleanup (void)
 {
+    text_cache_clear ();
     if (font) {
         TTF_CloseFont (font);
         font = NULL;
@@ -232,8 +333,9 @@ int misc_font_render (SDL_Surface *dst, int x, int y, const T_textstyle *style, 
         return 0;
 
     /* T_formattedrun_fn hands us a non-nul-terminated substring -- copy
-     * it out to a nul-terminated buffer for TTF_RenderUTF8_Blended,
-     * falling back to malloc for the rare run longer than stackbuf. */
+     * it out to a nul-terminated buffer for both the cache lookup key
+     * and (on a miss) TTF_RenderUTF8_Blended, falling back to malloc for
+     * the rare run longer than stackbuf. */
     if (len >= sizeof (stackbuf)) {
         buf = malloc (len + 1);
         if (!buf)
@@ -242,6 +344,19 @@ int misc_font_render (SDL_Surface *dst, int x, int y, const T_textstyle *style, 
     memcpy (buf, text, len);
     buf[len] = 0;
 
+    rendered = text_cache_lookup (buf, style);
+    if (rendered != NULL) {
+        dstrect.x = x;
+        dstrect.y = y;
+        dstrect.w = rendered->w;
+        dstrect.h = rendered->h;
+        SDL_BlitSurface (rendered, NULL, dst, &dstrect);
+        width = rendered->w;
+        if (buf != stackbuf)
+            free (buf);
+        return width;
+    }
+
     stylebits = TTF_STYLE_NORMAL;
     if (style->bold)      stylebits |= TTF_STYLE_BOLD;
     if (style->italic)    stylebits |= TTF_STYLE_ITALIC;
@@ -249,10 +364,11 @@ int misc_font_render (SDL_Surface *dst, int x, int y, const T_textstyle *style, 
     TTF_SetFontStyle (font, stylebits);
 
     rendered = TTF_RenderUTF8_Blended (font, buf, style->color);
-    if (buf != stackbuf)
-        free (buf);
-    if (rendered == NULL)
+    if (rendered == NULL) {
+        if (buf != stackbuf)
+            free (buf);
         return 0;
+    }
 
     dstrect.x = x;
     dstrect.y = y;
@@ -260,7 +376,14 @@ int misc_font_render (SDL_Surface *dst, int x, int y, const T_textstyle *style, 
     dstrect.h = rendered->h;
     SDL_BlitSurface (rendered, NULL, dst, &dstrect);
     width = rendered->w;
-    SDL_FreeSurface (rendered);
+
+    /* text_cache_insert() takes ownership of `rendered` (or frees it
+       itself if the string is too long to cache) -- don't also free it
+       here. */
+    text_cache_insert (buf, style, rendered);
+
+    if (buf != stackbuf)
+        free (buf);
 
     return width;
 }
