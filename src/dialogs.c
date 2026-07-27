@@ -92,9 +92,34 @@ draw_text_error (SDL_Surface *dst, int x, int y, const char *text)
 {
     T_textstyle style;
     style.color.r = 0xFF; style.color.g = 0x60; style.color.b = 0x60;
-   
+
     style.bold = style.italic = style.underline = 0;
     misc_font_render (dst, x, y, &style, text, strlen (text));
+}
+
+/* No text-measuring API exists (misc.h only exposes render + line-height),
+ * so long strings -- theme names, About window credit lines -- have no
+ * width limit and can overrun into neighbouring UI. Clip to `area` instead
+ * of measuring: truncates the pixels rather than the string, which is good
+ * enough to stop the overrun without adding a font-metrics API. */
+static void
+draw_text_clipped (SDL_Surface *dst, const SDL_Rect *area, int x, int y, const char *text, int bold)
+{
+    SDL_Rect saved_clip;
+    SDL_GetClipRect (dst, &saved_clip);
+    SDL_SetClipRect (dst, area);
+    draw_text (dst, x, y, text, bold);
+    SDL_SetClipRect (dst, &saved_clip);
+}
+
+static void
+draw_text_muted_clipped (SDL_Surface *dst, const SDL_Rect *area, int x, int y, const char *text)
+{
+    SDL_Rect saved_clip;
+    SDL_GetClipRect (dst, &saved_clip);
+    SDL_SetClipRect (dst, area);
+    draw_text_muted (dst, x, y, text);
+    SDL_SetClipRect (dst, &saved_clip);
 }
 
 static void
@@ -944,17 +969,24 @@ prefdialog_render (SDL_Surface *dst, const SDL_Rect *rect)
                 break;
             if (i == theme_select)
                 fill_box (dst, &prefs_theme_rows[i], 50, 50, 70);
-            draw_text (dst, prefs_theme_rows[i].x + 2, prefs_theme_rows[i].y, themes[i].name, 0);
+            draw_text_clipped (dst, &prefs_theme_rows[i], prefs_theme_rows[i].x + 2, prefs_theme_rows[i].y, themes[i].name, 0);
         }
         {
             int detail_x = prefs_box.x + DLG_PAD + 176;
             int detail_y = prefs_theme_rows[0].y;
+            SDL_Rect value_clip;
+
+            value_clip.x = detail_x + 90;
+            value_clip.y = prefs_box.y;
+            value_clip.w = prefs_box.x + prefs_box.w - DLG_PAD - value_clip.x;
+            value_clip.h = prefs_box.h;
+
             draw_text (dst, detail_x, detail_y, "Name:", 0);
-            draw_text (dst, detail_x + 90, detail_y, pref_theme_name, 0);
+            draw_text_clipped (dst, &value_clip, detail_x + 90, detail_y, pref_theme_name, 0);
             draw_text (dst, detail_x, detail_y + line_h + 4, "Author:", 0);
-            draw_text (dst, detail_x + 90, detail_y + line_h + 4, pref_theme_author, 0);
+            draw_text_clipped (dst, &value_clip, detail_x + 90, detail_y + line_h + 4, pref_theme_author, 0);
             draw_text (dst, detail_x, detail_y + 2 * (line_h + 4), "Description:", 0);
-            draw_text (dst, detail_x + 90, detail_y + 2 * (line_h + 4), pref_theme_desc, 0);
+            draw_text_clipped (dst, &value_clip, detail_x + 90, detail_y + 2 * (line_h + 4), pref_theme_desc, 0);
         }
     }
     else if (prefs_tab == PREFS_TAB_PARTYLINE) {
@@ -1087,12 +1119,20 @@ aboutdialog_render (SDL_Surface *dst, const SDL_Rect *rect)
     aboutdialog_layout (rect);
     draw_box (dst, &about_box, "About GTetrinet");
 
-    y = about_box.y + DLG_PAD + line_h + 10;
-    draw_text (dst, about_box.x + DLG_PAD, y, "GTetrinet " VERSION, 1); y += line_h + 4;
-    draw_text_muted (dst, about_box.x + DLG_PAD, y, "A Tetrinet client for GNOME."); y += line_h + 10;
-    draw_text_muted (dst, about_box.x + DLG_PAD, y, "Copyright 2004, 2005 Jordi Mallach, Dani Carbonell"); y += line_h + 2;
-    draw_text_muted (dst, about_box.x + DLG_PAD, y, "Copyright 1999-2003 Ka-shu Wong"); y += line_h + 10;
-    draw_text_muted (dst, about_box.x + DLG_PAD, y, "http://gtetrinet.sf.net");
+    {
+        SDL_Rect content_clip;
+        content_clip.x = about_box.x + DLG_PAD;
+        content_clip.y = about_box.y;
+        content_clip.w = about_box.w - DLG_PAD * 2;
+        content_clip.h = about_box.h;
+
+        y = about_box.y + DLG_PAD + line_h + 10;
+        draw_text_clipped (dst, &content_clip, about_box.x + DLG_PAD, y, "GTetrinet " VERSION, 1); y += line_h + 4;
+        draw_text_muted_clipped (dst, &content_clip, about_box.x + DLG_PAD, y, "A Tetrinet client for GNOME."); y += line_h + 10;
+        draw_text_muted_clipped (dst, &content_clip, about_box.x + DLG_PAD, y, "Copyright 2004, 2005 Jordi Mallach, Dani Carbonell"); y += line_h + 2;
+        draw_text_muted_clipped (dst, &content_clip, about_box.x + DLG_PAD, y, "Copyright 1999-2003 Ka-shu Wong"); y += line_h + 10;
+        draw_text_muted_clipped (dst, &content_clip, about_box.x + DLG_PAD, y, "http://gtetrinet.sf.net");
+    }
 
     draw_button (dst, &about_ok_button, "OK", 1);
 }

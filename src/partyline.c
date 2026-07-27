@@ -539,6 +539,34 @@ render_label_bold (SDL_Surface *dst, int x, int y, const char *text)
     misc_font_render (dst, x, y, &style, text, strlen (text));
 }
 
+/* infolabel_text can contain an embedded '\n' (see partyline_status()'s
+ * "Connected to\n<server>" caller) -- misc_font_render() has no line-break
+ * handling of its own, so a literal '\n' byte was rasterized as a missing-
+ * glyph box between the two halves of the message. Split it into separate
+ * render_label() calls instead; label_h in partyline_render() already
+ * reserves 2 line-heights for this. */
+static void
+render_label_lines (SDL_Surface *dst, int x, int y, const char *text)
+{
+    int line_h = misc_font_line_height ();
+    const char *line_start = text;
+    const char *nl;
+
+    while ((nl = strchr (line_start, '\n')) != NULL) {
+        char buf[256];
+        size_t len = (size_t) (nl - line_start);
+
+        if (len >= sizeof (buf))
+            len = sizeof (buf) - 1;
+        memcpy (buf, line_start, len);
+        buf[len] = 0;
+        render_label (dst, x, y, buf);
+        y += line_h;
+        line_start = nl + 1;
+    }
+    render_label (dst, x, y, line_start);
+}
+
 static void
 render_player_list (SDL_Surface *dst, const SDL_Rect *rect)
 {
@@ -601,7 +629,7 @@ void partyline_render (SDL_Surface *dst, const SDL_Rect *rect)
         g_snprintf (teambuf, sizeof (teambuf), "(%s)", teamlabel_text);
         render_label (dst, rect->x + 200, rect->y, teambuf);
     }
-    render_label (dst, rect->x, rect->y + line_h, infolabel_text);
+    render_label_lines (dst, rect->x, rect->y + line_h, infolabel_text);
     /* Second row, not the first: the name/team labels above have no
      * fixed width available without a text-measuring API (misc.h only
      * exposes render + line-height), so sharing a row with them risks

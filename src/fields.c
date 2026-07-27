@@ -439,12 +439,25 @@ render_fieldlabel (SDL_Surface *dst, int field, const SDL_Rect *rect)
 {
     T_textstyle style;
     char buf[160];
+    SDL_Rect label_rect, saved_clip;
 
     style.color.r = style.color.g = style.color.b = 0xFF;
     style.bold = style.italic = style.underline = 0;
 
+    /* Clip to the field's own column -- long "name (team)" strings have
+     * no width limit otherwise and can overrun into a neighbouring
+     * field's area (no text-measuring API exists to pre-truncate them,
+     * same limitation noted in partyline.c). */
+    label_rect.x = rect->x;
+    label_rect.y = rect->y + rect->h;
+    label_rect.w = rect->w;
+    label_rect.h = misc_font_line_height ();
+    SDL_GetClipRect (dst, &saved_clip);
+    SDL_SetClipRect (dst, &label_rect);
+
     if (!fieldhasname[field]) {
         misc_font_render (dst, rect->x, rect->y + rect->h + 2, &style, "Not playing", 11);
+        SDL_SetClipRect (dst, &saved_clip);
         return;
     }
 
@@ -453,6 +466,7 @@ render_fieldlabel (SDL_Surface *dst, int field, const SDL_Rect *rect)
     else
         g_snprintf (buf, sizeof (buf), "%d: %s", fieldnum[field], fieldname[field]);
     misc_font_render (dst, rect->x, rect->y + rect->h + 2, &style, buf, strlen (buf));
+    SDL_SetClipRect (dst, &saved_clip);
 }
 
 void fields_gmsgadd (const char *str)
