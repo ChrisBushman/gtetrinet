@@ -1,0 +1,65 @@
+name: Windows release build
+
+# One-off/manual build for release packaging, not a permanent CI gate --
+# see CMakeLists.txt (the same pkg-config-based build already used for
+# macOS, here built with MSYS2/MinGW instead of a hand-rolled MSVC
+# project: gtetrinet depends on glib, which has no first-class MSVC
+# support without a vcpkg port, while mingw-w64's glib2/SDL2 packages
+# are first-class and match what pkg_check_modules already expects on
+# every other platform). Triggered by hand from the Actions tab or
+# `gh workflow run windows-release-build.yml`.
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-toolchain
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-pkgconf
+            mingw-w64-x86_64-glib2
+            mingw-w64-x86_64-SDL2
+            mingw-w64-x86_64-SDL2_image
+            mingw-w64-x86_64-SDL2_ttf
+            mingw-w64-x86_64-SDL2_mixer
+
+      - name: Configure
+        run: cmake -S . -B build -G "MSYS Makefiles" -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --config Release
+
+      # GTETRINET_DATA/GTETPIXMAPSDIR are "." / "./icons" on Windows
+      # (see CMakeLists.txt) -- everything the .exe needs to find at
+      # its own working directory has to actually be sitting there,
+      # same as AmuletsArmor's Exe/ folder convention. mingw's shared
+      # libs (SDL2.dll, glib's dependency chain, etc.) also aren't
+      # present on a bare Windows machine, so those get copied in too.
+      - name: Assemble portable release folder
+        run: |
+          mkdir -p dist
+          cp build/gtetrinet.exe dist/
+          cp gtetrinet.png dist/
+          cp -r themes dist/
+          cp -r icons dist/
+          cp -r data dist/
+          for dll in $(ldd dist/gtetrinet.exe | grep -i mingw64 | awk '{print $3}'); do
+            cp "$dll" dist/
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gtetrinet-windows
+          path: dist/
+          if-no-files-found: error

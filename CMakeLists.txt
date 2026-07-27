@@ -1,11 +1,13 @@
 # CMake build for the SDL port (modern macOS / generic Unix with
-# pkg-config-discoverable deps). PPC/Tiger and IRIX use their own
+# pkg-config-discoverable deps, and Windows via MSYS2/MinGW -- see
+# .github/workflows/windows-release-build.yml, which builds this same
+# file with mingw-w64 packages supplying SDL2/glib instead of hand-
+# rolling a separate MSVC project). PPC/Tiger and IRIX use their own
 # native Makefiles under Build/<Platform>/ instead (MIPSPro-era/old-gcc
-# toolchains and ancient CMake, if any, aren't a good fit); Windows
-# uses a Visual Studio project. This file replaces nothing from the
-# pre-SDL-rewrite autotools setup (configure.ac/Makefile.am) -- that
-# still describes the old GTK3+GSettings build and is left alone for
-# now, not wired into this target.
+# toolchains and ancient CMake, if any, aren't a good fit). This file
+# replaces nothing from the pre-SDL-rewrite autotools setup
+# (configure.ac/Makefile.am) -- that still describes the old GTK3+
+# GSettings build and is left alone for now, not wired into this target.
 
 cmake_minimum_required(VERSION 3.20)
 
@@ -64,11 +66,31 @@ target_link_libraries(${GTET_EXE_NAME} PRIVATE
 # accounts for the "data/" prefix, since that's this repo's own
 # directory name, unrelated to the constant's own name). GTETPIXMAPSDIR
 # is icons/ specifically (team.png/alone.png; see winlist.c).
+#
+# On Windows this is "." / "./icons" instead of the absolute source
+# path: a downloaded release .exe has no reason to still be sitting at
+# this machine's build path, and there's no runtime executable-path
+# resolution in this codebase to fall back on. Same convention
+# AmuletsArmor already uses (plain relative fopen("cosine.dat", ...)
+# etc., resources shipped next to the .exe in Exe/) -- launching by
+# double-click or from a shell in that same folder sets the working
+# directory to wherever the .exe actually is, which is all this needs.
+# macOS/PPC-Tiger/IRIX keep the absolute path: those are deployed by
+# this project's own rsync-to-a-fixed-remote-path scripts and run in
+# place, not downloaded to an arbitrary folder.
+if(WIN32)
+    set(GTET_DATA_DIR ".")
+    set(GTET_PIXMAPS_DIR "./icons")
+else()
+    set(GTET_DATA_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
+    set(GTET_PIXMAPS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/icons")
+endif()
+
 target_compile_definitions(${GTET_EXE_NAME} PRIVATE
     VERSION="${GTET_VERSION}"
     PACKAGE="gtetrinet"
-    GTETRINET_DATA="${CMAKE_CURRENT_SOURCE_DIR}"
-    GTETPIXMAPSDIR="${CMAKE_CURRENT_SOURCE_DIR}/icons"
+    GTETRINET_DATA="${GTET_DATA_DIR}"
+    GTETPIXMAPSDIR="${GTET_PIXMAPS_DIR}"
 )
 
 if(APPLE OR UNIX)
