@@ -63,9 +63,29 @@ vpath %.c $(SRC_DIR)
 
 # VERSION/PACKAGE mirror configure.ac's AC_INIT (gtetrinet, 0.8.0), same
 # as the top-level CMakeLists.txt / Build/MacOSX-PPC/Makefile.
+# GTETRINET_DATA/GTETPIXMAPSDIR point at this synced repo checkout
+# directly -- unless GTET_RELATIVE_DATA_DIR is set (`gmake
+# GTET_RELATIVE_DATA_DIR=1`), which points them at "."/"./icons"
+# instead, matching CMakeLists.txt's/Build/MacOSX-PPC/Makefile's own
+# GTET_RELATIVE_DATA_DIR option. That's for release packaging: a
+# downloaded tarball has no reason to still be sitting at this
+# machine's checkout path, and (unlike the macOS bundle case) there's
+# no bundle-relative chdir needed here either -- IRIX has no app-bundle
+# concept, so this only works if the release package's own run-o2.csh
+# launcher cd's into its own directory first (it does). Off by default
+# since this Makefile's normal dev/test use (remote-build.sh + running
+# directly from build/) needs the absolute path instead.
+ifdef GTET_RELATIVE_DATA_DIR
+GTET_DATA_DIR    := .
+GTET_PIXMAPS_DIR := ./icons
+else
+GTET_DATA_DIR    := $(REPO_ROOT)
+GTET_PIXMAPS_DIR := $(REPO_ROOT)/icons
+endif
+
 DEFINES := -DVERSION='"0.8.0"' -DPACKAGE='"gtetrinet"' \
-           -DGTETRINET_DATA='"$(REPO_ROOT)"' \
-           -DGTETPIXMAPSDIR='"$(REPO_ROOT)/icons"'
+           -DGTETRINET_DATA='"$(GTET_DATA_DIR)"' \
+           -DGTETPIXMAPSDIR='"$(GTET_PIXMAPS_DIR)"'
 
 INCLUDES := -I$(SRC_DIR)
 
