@@ -27,6 +27,7 @@ jobs:
           install: >-
             mingw-w64-x86_64-toolchain
             mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-ninja
             mingw-w64-x86_64-pkgconf
             mingw-w64-x86_64-glib2
             mingw-w64-x86_64-SDL2
@@ -34,8 +35,12 @@ jobs:
             mingw-w64-x86_64-SDL2_ttf
             mingw-w64-x86_64-SDL2_mixer
 
+      # Ninja, not "MSYS Makefiles"/"MinGW Makefiles": the former needs
+      # base-MSYS's own make (not installed -- only mingw64's
+      # mingw32-make is), and the latter refuses to run at all with
+      # sh.exe on PATH, which it always is inside this msys2 shell.
       - name: Configure
-        run: cmake -S . -B build -G "MSYS Makefiles" -DCMAKE_BUILD_TYPE=Release
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 
       - name: Build
         run: cmake --build build --config Release
