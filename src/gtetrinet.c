@@ -62,6 +62,13 @@ static SDL_Surface *fields_canvas;
 static int win_w, win_h;
 static SDL_Rect menubar_rect, tabbar_rect, content_rect;
 
+/* 30fps rather than 60: halves the per-frame render workload (~1500+
+ * tile blits plus every text label get redrawn from scratch each
+ * frame -- see fields_render()) for no real playability cost in a
+ * tetris-style game, and matters on hardware with no blit acceleration
+ * (real IRIX/O2). */
+#define FRAME_INTERVAL_MS 33
+
 #define MAX_MENU_RECTS 16
 static SDL_Rect menu_rects[MAX_MENU_RECTS];
 static T_command_id menu_rect_ids[MAX_MENU_RECTS];
@@ -581,8 +588,8 @@ main (int argc, char *argv[])
         render_frame ();
 
         now = SDL_GetTicks ();
-        if (now - last_tick < 16)
-            SDL_Delay (16 - (now - last_tick));
+        if (now - last_tick < FRAME_INTERVAL_MS)
+            SDL_Delay (FRAME_INTERVAL_MS - (now - last_tick));
         last_tick = SDL_GetTicks ();
     }
 

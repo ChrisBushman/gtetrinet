@@ -40,6 +40,16 @@
 #define LOG_VISIBLE_LINES 6
 
 static SDL_Surface *blockpix;
+/* Set once blockpix has been converted (in fields_render(), the first
+ * call after each load) to match the destination surface's own pixel
+ * format -- reset to 0 whenever a new blockpix is loaded. Without this,
+ * SDL_BlitSurface() has to do a per-pixel format conversion on every
+ * blit_tile() call whenever the theme PNG's format doesn't happen to
+ * match dst's, and there are 12*22*6 = 1584 of those calls every single
+ * frame (render_field() for the own field plus 5 opponents) -- on
+ * hardware with no blit acceleration (real IRIX/O2) that overhead is
+ * the difference between playable and not. */
+static int blockpix_converted;
 
 static FIELD displayfields[6]; /* what is actually displayed; field 0 == own */
 static TETRISBLOCK displayblock;
@@ -109,6 +119,7 @@ int fields_init (void)
             return -1;
         }
     }
+    blockpix_converted = 0;
     return 0;
 }
 
@@ -521,6 +532,18 @@ const char *fields_gmsginputtext (void)
 void fields_render (SDL_Surface *dst)
 {
     int i;
+
+    if (!blockpix_converted) {
+        SDL_Surface *converted = SDL_ConvertSurface (blockpix, dst->format, 0);
+        if (converted) {
+            SDL_FreeSurface (blockpix);
+            blockpix = converted;
+        }
+        /* Set even on failure (converted == NULL, e.g. out of memory) --
+           blit_tile() falls back to the slower mismatched-format path
+           rather than retrying this conversion every single frame. */
+        blockpix_converted = 1;
+    }
 
     render_field (dst, 0, &ownfield_rect);
     render_fieldlabel (dst, 0, &ownfield_rect);
