@@ -451,6 +451,39 @@ route_textinput (const char *text)
         partyline_textinput (text);
 }
 
+/* Whether this frame is worth actually rendering and pushing to the
+ * display. video_flip() serializes the whole window through the plain
+ * X11 protocol every time it's called (confirmed: this SDL build has
+ * no MIT-SHM support at all), which dominates real per-frame cost on
+ * hardware with no blit acceleration (real IRIX/O2) far more than the
+ * rendering work itself -- so the win is in not calling it at all on a
+ * frame where nothing could plausibly have changed, not in rendering
+ * faster.
+ *
+ * Deliberately coarse rather than a true per-widget dirty-rect system:
+ * "something happened this frame" (an input event) or "we're in a
+ * state where anything could be changing on its own" (connected to a
+ * server, a game in progress, typing a game message, or a dialog open)
+ * are each treated as "just redraw", the same as every frame did
+ * before this existed. That's far cheaper to reason about and much
+ * lower-risk than instrumenting every individual state mutator across
+ * fields.c/partyline.c/dialogs.c/winlist.c/commands.c/config.c (dozens
+ * of call sites -- miss one and the screen silently stops updating);
+ * it only forgoes skipping frames in cases (an event that turns out to
+ * change nothing) that don't matter for the actual problem being
+ * fixed, which is CPU burned redrawing a genuinely idle menu screen. */
+static int
+should_render (int had_event)
+{
+    if (had_event)
+        return 1;
+    if (connected || ingame || gmsgstate)
+        return 1;
+    if (dialog_is_open ())
+        return 1;
+    return 0;
+}
+
 int
 main (int argc, char *argv[])
 {
@@ -543,11 +576,20 @@ main (int argc, char *argv[])
     app_mainloop_running = 1;
     last_tick = SDL_GetTicks ();
 
+    /* should_render()'s first call could plausibly see no event yet
+       (nothing queued the instant the loop starts) and no connected/
+       ingame/dialog state either -- force the initial frame explicitly
+       rather than relying on the window's own expose event arriving
+       before the first SDL_Delay. */
+    render_frame ();
+
     while (running) {
         SDL_Event ev;
         Uint32 now;
+        int had_event = 0;
 
         while (SDL_PollEvent (&ev)) {
+            had_event = 1;
             switch (ev.type) {
             case SDL_QUIT:
                 running = 0;
@@ -570,6 +612,21 @@ main (int argc, char *argv[])
             case SDL_TEXTINPUT:
                 route_textinput (ev.text.text);
                 break;
+            case SDL_WINDOWEVENT:
+                /* SDL2's equivalent of SDL 1.2's SDL_VIDEOEXPOSE below --
+                   already counted as an "event happened" via had_event,
+                   nothing more to do here than let that fall through. */
+                break;
+#else
+            case SDL_VIDEOEXPOSE:
+                /* No window-manager backing store on plain X11 without a
+                   compositor (the normal case on real IRIX) -- a window
+                   that was covered and is now exposed needs an explicit
+                   redraw, or it can show stale/garbage pixels. Already
+                   counted via had_event; this case only exists so it
+                   doesn't fall into "unhandled", which is harmless
+                   either way but documents that it's intentional. */
+                break;
 #endif
             case SDL_MOUSEBUTTONDOWN:
                 if (ev.button.button == SDL_BUTTON_LEFT)
@@ -585,7 +642,8 @@ main (int argc, char *argv[])
         client_poll_socket ();
         dialog_tick ();
 
-        render_frame ();
+        if (should_render (had_event))
+            render_frame ();
 
         now = SDL_GetTicks ();
         if (now - last_tick < FRAME_INTERVAL_MS)
