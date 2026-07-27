@@ -258,6 +258,15 @@ void config_loadtheme (const gchar *themedir)
             soundfiles[i][0] = 0;
     }
 
+    p = g_key_file_get_string (keyfile, "Sounds", "Theme", NULL);
+    if (p) {
+        GTET_O_STRCPY(musicfile, themedir);
+        GTET_O_STRCAT(musicfile, p);
+        g_free (p);
+    }
+    else
+        musicfile[0] = 0;
+
     sound_cache ();
 
     g_key_file_unref (keyfile);
@@ -266,10 +275,10 @@ void config_loadtheme (const gchar *themedir)
 
  bad_theme:
     {
-      /* Was a GTK modal warning dialog -- dialogs.c (not yet ported)
-       * owns the app's dialog/messagebox machinery going forward, so
-       * for now this just logs, matching fields_init()'s own fallback
-       * message for the equivalent "can't load this theme" case. */
+      /* Was a GTK modal warning dialog; this is a startup-time,
+       * rarely-hit path (a broken/misnamed theme.cfg) so it just logs
+       * instead, matching fields_init()'s own fallback message for the
+       * equivalent "can't load this theme" case. */
       fprintf (stderr, "Warning: theme '%s' does not have a name, reverting to default.\n", themedir);
       g_key_file_unref (keyfile);
       g_string_assign(currenttheme, DEFAULTTHEME);

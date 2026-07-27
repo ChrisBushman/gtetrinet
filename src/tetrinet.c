@@ -1476,6 +1476,7 @@ void tetrinet_startgame (void)
         tetrinet_nextblock ();
     }
     sound_playsound (S_GAMESTART);
+    sound_playmusic ();
 }
 
 void tetrinet_pausegame (void)
@@ -1524,6 +1525,7 @@ void tetrinet_endgame (void)
         if (playerplaying[i]) c ++;
     if (playing && playercount > 1 && c == 1)
         sound_playsound (S_YOUWIN);
+    sound_stopmusic ();
     ingame = playing = FALSE;
     if (movedowntimeout)
         sched_timer_remove (movedowntimeout);

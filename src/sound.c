@@ -26,9 +26,11 @@
 int soundenable;
 
 char soundfiles[S_NUM][1024];
+char musicfile[1024];
 
 static int mixer_ready = 0;
 static Mix_Chunk *samples[S_NUM] = {NULL};
+static Mix_Music *music = NULL;
 
 int sound_init (void)
 {
@@ -50,6 +52,11 @@ void sound_cleanup (void)
             Mix_FreeChunk (samples[i]);
             samples[i] = NULL;
         }
+    }
+    if (music != NULL) {
+        Mix_HaltMusic ();
+        Mix_FreeMusic (music);
+        music = NULL;
     }
     if (mixer_ready) {
         Mix_CloseAudio ();
@@ -85,4 +92,30 @@ void sound_playsound (int id)
         return;
     if (samples[id] != NULL)
         Mix_PlayChannel (-1, samples[id], 0);
+}
+
+void sound_playmusic (void)
+{
+    if (!soundenable || !mixer_ready || !musicfile[0])
+        return;
+
+    if (music != NULL) {
+        Mix_HaltMusic ();
+        Mix_FreeMusic (music);
+        music = NULL;
+    }
+
+    music = Mix_LoadMUS (musicfile);
+    /* NULL here just means this SDL_mixer build can't play MIDI (no
+       backend compiled in) or the file itself didn't load -- silent,
+       matching sound_cache()'s handling of an unplayable sound effect. */
+    if (music != NULL)
+        Mix_PlayMusic (music, -1);
+}
+
+void sound_stopmusic (void)
+{
+    if (!mixer_ready)
+        return;
+    Mix_HaltMusic ();
 }

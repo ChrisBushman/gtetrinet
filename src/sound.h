@@ -15,6 +15,11 @@ extern int soundenable;
 
 extern char soundfiles[S_NUM][1024];
 
+/* Theme's background music track (e.g. the classic TetriNET MIDI theme),
+ * set by config_loadtheme() from theme.cfg's [Sounds] "Theme" key --
+ * empty string if the theme doesn't ship one. */
+extern char musicfile[1024];
+
 /* Call once at startup, after SDL_Init(SDL_INIT_AUDIO) -- opens the
  * audio device via SDL_mixer. Returns 0 on success. If this fails (no
  * audio hardware, e.g. some IRIX/O2 configurations), sound_cache()/
@@ -26,4 +31,13 @@ void sound_cleanup (void);
 
 void sound_cache (void);
 void sound_playsound (int id);
+
+/* Starts/stops the theme's looping background music (tetrinet_startgame()/
+ * tetrinet_endgame() call these). Safe no-ops if sound is disabled, the
+ * mixer failed to open, musicfile is empty, or this SDL_mixer build has
+ * no MIDI backend (some SDL_mixer 1.2 builds on IRIX/PPC-Tiger don't --
+ * Mix_LoadMUS() just returns NULL there, handled the same as an
+ * unplayable sound effect elsewhere in this file). */
+void sound_playmusic (void);
+void sound_stopmusic (void);
 
