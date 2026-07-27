@@ -51,10 +51,26 @@ vpath %.c $(SRC_DIR)
 # VERSION/PACKAGE mirror configure.ac's AC_INIT (gtetrinet, 0.8.0), same
 # as the top-level CMakeLists.txt. GTETRINET_DATA/GTETPIXMAPSDIR point at
 # this synced repo checkout directly (see CMakeLists.txt's comment for
-# why they're two different subpaths, not one).
+# why they're two different subpaths, not one) -- unless
+# GTET_RELATIVE_DATA_DIR is set (`make GTET_RELATIVE_DATA_DIR=1`), which
+# points them at "."/"./icons" instead, matching CMakeLists.txt's
+# GTET_RELATIVE_DATA_DIR option. That's for building a real .app bundle
+# for release: gtetrinet.c's gtet_chdir_to_bundle_resources() chdir()s
+# into Contents/Resources at startup specifically when running inside a
+# bundle, which is what makes "." resolve correctly there. Off by
+# default since this Makefile's normal dev/test use (remote-build.sh +
+# running directly from build/) needs the absolute path instead.
+ifdef GTET_RELATIVE_DATA_DIR
+GTET_DATA_DIR    := .
+GTET_PIXMAPS_DIR := ./icons
+else
+GTET_DATA_DIR    := $(REPO_ROOT)
+GTET_PIXMAPS_DIR := $(REPO_ROOT)/icons
+endif
+
 DEFINES := -DVERSION='"0.8.0"' -DPACKAGE='"gtetrinet"' \
-           -DGTETRINET_DATA='"$(REPO_ROOT)"' \
-           -DGTETPIXMAPSDIR='"$(REPO_ROOT)/icons"'
+           -DGTETRINET_DATA='"$(GTET_DATA_DIR)"' \
+           -DGTETPIXMAPSDIR='"$(GTET_PIXMAPS_DIR)"'
 
 ARCHFLAGS := -arch $(ARCH) -mmacosx-version-min=$(MACOSX_VERSION_MIN)
 ifneq ($(strip $(SDKROOT)),)

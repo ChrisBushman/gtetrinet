@@ -24,6 +24,10 @@
 #if defined(__sgi)
 #include <unistd.h>
 #endif
+#if defined(__APPLE__)
+#include <unistd.h>
+#include <mach-o/dyld.h>
+#endif
 #include <glib.h>
 #include <SDL.h>
 #include <SDL_image.h>
@@ -495,9 +499,46 @@ should_render (int had_event, int tick_fired, int socket_activity)
     return 0;
 }
 
+#if defined(__APPLE__)
+/* A double-clicked (or `open`-launched) .app bundle's working directory
+ * is whatever Finder/launchd happened to set it to -- unlike a plain
+ * command-line binary, there's no guarantee it's anywhere near this
+ * executable, or even the same every time. GTETRINET_DATA/GTETPIXMAPSDIR
+ * are "." for a bundle build (GTET_RELATIVE_DATA_DIR in CMakeLists.txt),
+ * so make "." mean something real: if this executable's own path looks
+ * like it's inside a bundle (.../Contents/MacOS/gtetrinet), chdir into
+ * .../Contents/Resources before anything (theme/font/icon loading)
+ * tries to open a path relative to cwd. Silently does nothing for the
+ * plain dev binary, which was never built with GTET_RELATIVE_DATA_DIR
+ * on and isn't inside a bundle to begin with. */
+static void
+gtet_chdir_to_bundle_resources (void)
+{
+    char exe_path[4096];
+    uint32_t size = sizeof (exe_path);
+    char *macos_pos;
+    char resources_path[4096];
+
+    if (_NSGetExecutablePath (exe_path, &size) != 0)
+        return;
+
+    macos_pos = strstr (exe_path, "/Contents/MacOS/");
+    if (!macos_pos)
+        return;
+
+    *macos_pos = 0;
+    g_snprintf (resources_path, sizeof (resources_path), "%s/Contents/Resources", exe_path);
+    chdir (resources_path);
+}
+#endif
+
 int
 main (int argc, char *argv[])
 {
+#if defined(__APPLE__)
+    gtet_chdir_to_bundle_resources ();
+#endif
+
     char *option_connect = NULL, *option_nick = NULL, *option_team = NULL, *option_pass = NULL;
     int option_spec = 0;
     int i;

@@ -67,18 +67,30 @@ target_link_libraries(${GTET_EXE_NAME} PRIVATE
 # directory name, unrelated to the constant's own name). GTETPIXMAPSDIR
 # is icons/ specifically (team.png/alone.png; see winlist.c).
 #
-# On Windows this is "." / "./icons" instead of the absolute source
-# path: a downloaded release .exe has no reason to still be sitting at
-# this machine's build path, and there's no runtime executable-path
-# resolution in this codebase to fall back on. Same convention
-# AmuletsArmor already uses (plain relative fopen("cosine.dat", ...)
-# etc., resources shipped next to the .exe in Exe/) -- launching by
-# double-click or from a shell in that same folder sets the working
-# directory to wherever the .exe actually is, which is all this needs.
-# macOS/PPC-Tiger/IRIX keep the absolute path: those are deployed by
-# this project's own rsync-to-a-fixed-remote-path scripts and run in
-# place, not downloaded to an arbitrary folder.
-if(WIN32)
+# "." / "./icons" instead of the absolute source path when
+# GTET_RELATIVE_DATA_DIR is on: a downloaded release build has no
+# reason to still be sitting at this machine's build path. Defaults on
+# for Windows (there's no runtime executable-path resolution in this
+# codebase to fall back on there, so "." has to be made to mean
+# something by other means -- see the Windows CI workflow's portable
+# folder convention) and off everywhere else, since the default
+# CMakeLists.txt build here is what this project's own dev/test tooling
+# actually runs (see remote-build.sh for PPC-Tiger/IRIX, and the plain
+# ./out/gtetrinet invocations used throughout this session) with a cwd
+# that doesn't match the binary's own location.
+#
+# Turn it on explicitly to build a real macOS .app bundle instead (see
+# Build/MacOSX-App/): gtetrinet.c's gtet_chdir_to_bundle_resources()
+# chdir()s into Contents/Resources at startup specifically when running
+# inside a bundle (detected via the executable's own path containing
+# "/Contents/MacOS/"), which is what makes "." resolve correctly for a
+# double-clicked app whose actual working directory Finder sets to
+# something unrelated (there's no equivalent problem for a plain
+# command-line binary, which is why this needs to be opt-in rather than
+# the unconditional default even on Apple platforms).
+option(GTET_RELATIVE_DATA_DIR "Use relative data paths instead of the absolute source directory (for portable release packaging)" WIN32)
+
+if(GTET_RELATIVE_DATA_DIR)
     set(GTET_DATA_DIR ".")
     set(GTET_PIXMAPS_DIR "./icons")
 else()
