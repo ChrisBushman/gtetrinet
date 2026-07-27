@@ -23,16 +23,34 @@
 
 #include <stdio.h>
 #include <string.h>
-#include <unistd.h>
 #include <sys/types.h>
 #include <sys/time.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <netdb.h>
 #include <errno.h>
 #include <signal.h>
 #include <ctype.h>
 #include <glib/gi18n.h>
+
+/* mingw-w64 (this port's Windows target) has no sys/socket.h/netinet/
+   in.h/netdb.h -- Winsock is a separate API, not BSD sockets, even
+   though the function names mostly match. sys/types.h and sys/time.h
+   above are both real mingw-w64 headers (confirmed by CI: they compile
+   standalone, with mingw's own struct timeval matching winsock2.h's --
+   no redefinition conflict), so those stay unconditional. */
+#if defined(_WIN32)
+#include <winsock2.h>
+#include <ws2tcpip.h>
+typedef SOCKET gtet_sock_t;
+#define GTET_INVALID_SOCK INVALID_SOCKET
+#define GTET_CLOSESOCK(s) closesocket (s)
+#else
+#include <unistd.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <netdb.h>
+typedef int gtet_sock_t;
+#define GTET_INVALID_SOCK (-1)
+#define GTET_CLOSESOCK(s) close (s)
+#endif
 
 #include "client.h"
 #include "tetrinet.h"
@@ -51,6 +69,45 @@
 extern int snprintf (char *str, size_t size, const char *format, ...);
 #endif
 
+#if defined(_WIN32)
+/* Winsock never sets errno -- socket/connect/send/recv failures report
+   through WSAGetLastError() instead, so strerror(errno) would print
+   whatever unrelated value happened to be in errno (usually "No
+   error"). This is the equivalent for the handful of g_warning() calls
+   below that previously used strerror(errno) for a real socket error. */
+static const char *
+gtet_socket_strerror (void)
+{
+    static char buf[256];
+    int err = WSAGetLastError ();
+    if (!FormatMessageA (FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+                          NULL, err, 0, buf, sizeof (buf), NULL))
+        g_snprintf (buf, sizeof (buf), "Winsock error %d", err);
+    return buf;
+}
+#define GTET_SOCK_STRERROR() gtet_socket_strerror ()
+
+/* Winsock needs WSAStartup() before any socket call; called once, from
+   client_process() (the first thing client_init() does), before the
+   background resolve/connect thread that makes the first actual socket
+   call is even spawned. No matching WSACleanup() -- the process is
+   about to either keep running with sockets still in use or exit
+   outright, and the OS reclaims Winsock resources on exit either way. */
+static int wsa_initialized;
+
+static void
+gtet_ensure_wsa_init (void)
+{
+    if (!wsa_initialized) {
+        WSADATA wsadata;
+        WSAStartup (MAKEWORD (2, 2), &wsadata);
+        wsa_initialized = 1;
+    }
+}
+#else
+#define GTET_SOCK_STRERROR() strerror (errno)
+#endif
+
 #define PORT 31457
 #define SPECPORT 31458
 
@@ -63,7 +120,7 @@ char server[128];
    made sense yet). Owned and set by the app's main loop startup code. */
 int app_mainloop_running = 0;
 
-static int sock;
+static gtet_sock_t sock;
 /* connect_pending: client_process() kicks off the background resolve
    thread and returns immediately instead of blocking (there is no GTK
    main loop to spin via gtk_main_iteration() while waiting) -- 1 while a
@@ -251,6 +308,9 @@ static GThread *resolve_thread;
 
 void client_process (void)
 {
+#if defined(_WIN32)
+  gtet_ensure_wsa_init ();
+#endif
   errno = 0;
   resolved = 0;
   connect_pending = 1;
@@ -285,8 +345,15 @@ void client_poll_connect (void)
 
     GTET_O_STRCPY(errmsg, "noconnecting ");
 
+#if defined(_WIN32)
+    /* No h_errno on Windows (getaddrinfo() there isn't the BSD
+       resolver h_errno was ever about); WSAGetLastError() covers both
+       the resolve and the socket/connect failure paths uniformly. */
+    GTET_O_STRCAT(errmsg, GTET_SOCK_STRERROR ());
+#else
     if (errno)        GTET_O_STRCAT(errmsg, strerror (errno));
     else if (h_errno) GTET_O_STRCAT(errmsg, _("Couldn't resolve hostname."));
+#endif
 
     client_inmessage (errmsg);
 
@@ -369,7 +436,7 @@ gpointer client_resolv_hostname (void)
     }
     for (res = res0; res; res = res->ai_next) {
         sock = socket (res->ai_family, res->ai_socktype, res->ai_protocol);
-        if (sock < 0) {
+        if (sock == GTET_INVALID_SOCK) {
             if (res->ai_next)
                 continue;
             else {
@@ -381,10 +448,10 @@ gpointer client_resolv_hostname (void)
         getnameinfo(res->ai_addr, res->ai_addrlen, hbuf, sizeof(hbuf), NULL, 0, 0);
         if (connect(sock, res->ai_addr, res->ai_addrlen) < 0) {
             if (res->ai_next) {
-                close(sock);
+                GTET_CLOSESOCK(sock);
                 continue;
             } else {
-                close(sock);
+                GTET_CLOSESOCK(sock);
                 freeaddrinfo(res0);
                 resolved = -1;
                 g_thread_exit (GINT_TO_POINTER (-1));
@@ -418,7 +485,7 @@ void client_disconnect (void)
         client_inmessage ("disconnect");
       sched_remove_all ();
       shutdown (sock, 2);
-      close (sock);
+      GTET_CLOSESOCK(sock);
       connected = 0;
       socket_open = 0;
       connect_pending = 0;
@@ -498,7 +565,7 @@ int client_sendmsg (char *str)
         if (n < 0) {
             if (errno == EINTR)
                 continue;
-            g_warning ("client_sendmsg: send() failed: %s", strerror (errno));
+            g_warning ("client_sendmsg: send() failed: %s", GTET_SOCK_STRERROR ());
             break;
         }
         sent += n;
@@ -532,7 +599,7 @@ int client_readmsg (gchar **str)
       }
       if (n < 0)
       {
-        g_warning ("client_readmsg: recv() failed: %s", strerror (errno));
+        g_warning ("client_readmsg: recv() failed: %s", GTET_SOCK_STRERROR ());
         return -1;
       }
 

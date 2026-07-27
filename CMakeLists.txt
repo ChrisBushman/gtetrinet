@@ -117,3 +117,10 @@ endif()
 if(GTET_WARNINGS_AS_ERRORS)
     target_compile_options(${GTET_EXE_NAME} PRIVATE -Werror)
 endif()
+
+if(WIN32)
+    # client.c's Winsock port (socket()/connect()/send()/recv()/
+    # getaddrinfo()/WSAStartup()/etc.) lives in ws2_32, not linked by
+    # default the way BSD sockets need no extra -l on Unix.
+    target_link_libraries(${GTET_EXE_NAME} PRIVATE ws2_32)
+endif()
