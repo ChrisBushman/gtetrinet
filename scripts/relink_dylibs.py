@@ -9,12 +9,30 @@ binary's several distinct build-time absolute rpaths all onto the same
 commands that a modern dyld refuses to load at all.
 """
 import os
+import re
 import shutil
 import subprocess
 import sys
 
 SYSTEM_DYLIB_PREFIXES = ("/usr/lib/", "/System/Library/")
 ALREADY_RELINKED_PREFIX = "@executable_path/../Frameworks/"
+
+# SDL_image never *links* its image-format backends -- it loads each one
+# lazily the first time it decodes that format, via dlopen() of a bare,
+# unversioned leaf name (see `strings libSDL_image...dylib`). relink_dylibs()
+# above only ever walks real LC_LOAD_DYLIB entries, so it copies in the
+# versioned libpng16.16.dylib (as a transitive dep of freetype) but never
+# under the plain "libpng.dylib" name SDL_image actually dlopen()s. dyld
+# resolves a slash-less dlopen name against DYLD_LIBRARY_PATH only, never
+# @executable_path -- so gtetrinet.c re-execs with DYLD_LIBRARY_PATH set to
+# this Frameworks dir, and here we make sure the bare names it'll ask for
+# actually exist in it, as symlinks onto whatever versioned copy landed.
+SDL_IMAGE_DLOPEN_ALIASES = (
+    "libpng.dylib",
+    "libjpeg.dylib",
+    "libtiff.dylib",
+    "libwebp.dylib",
+)
 
 
 def run(cmd):
@@ -108,6 +126,31 @@ def relink_dylibs(binary_path, frameworks_dir, loader_dir=None, _seen=None):
             relink_dylibs(dst_dylib, frameworks_dir, os.path.dirname(resolved_path), _seen)
 
 
+def create_dlopen_aliases(frameworks_dir):
+    """For each bare name SDL_image dlopen()s (libpng.dylib, ...), symlink
+    it onto the versioned copy already in frameworks_dir (libpng16.16.dylib,
+    ...), if one is present and the bare name doesn't already exist. The
+    symlink is relative so it survives the bundle being moved around."""
+    if not os.path.isdir(frameworks_dir):
+        return
+    present = os.listdir(frameworks_dir)
+    for alias in SDL_IMAGE_DLOPEN_ALIASES:
+        alias_path = os.path.join(frameworks_dir, alias)
+        if os.path.lexists(alias_path):
+            continue
+        stem = alias[: -len(".dylib")]  # e.g. "libpng"
+        # Match versioned siblings like libpng16.16.dylib / libjpeg.9.dylib:
+        # same stem, then a version (digit or '.') before the .dylib suffix.
+        pattern = re.compile(r"^" + re.escape(stem) + r"[.0-9].*\.dylib$")
+        matches = sorted(name for name in present if pattern.match(name))
+        if not matches:
+            continue
+        target = matches[0]
+        print(f"+ ln -s {target} {alias_path}", flush=True)
+        os.symlink(target, alias_path)
+
+
 if __name__ == "__main__":
     binary_path, frameworks_dir = sys.argv[1], sys.argv[2]
     relink_dylibs(binary_path, frameworks_dir)
+    create_dlopen_aliases(frameworks_dir)
