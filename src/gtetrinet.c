@@ -530,55 +530,21 @@ gtet_chdir_to_bundle_resources (void)
     g_snprintf (resources_path, sizeof (resources_path), "%s/Contents/Resources", exe_path);
     chdir (resources_path);
 }
-
-static void
-gtet_fixup_dyld_library_path (char *const argv[])
-{
-    char exe_path[4096];
-    char exe_full[4096];
-    uint32_t size = sizeof (exe_path);
-    char *macos_pos;
-    char frameworks_path[4096];
-    const char *existing;
-
-    if (getenv ("GTET_DYLD_REEXEC"))
-        return;                 /* already re-exec'd once this launch */
-
-    if (_NSGetExecutablePath (exe_path, &size) != 0)
-        return;
-    g_strlcpy (exe_full, exe_path, sizeof (exe_full));
-
-    macos_pos = strstr (exe_path, "/Contents/MacOS/");
-    if (!macos_pos)
-        return;                 /* not a bundle -- plain dev binary */
-
-    *macos_pos = 0;
-    g_snprintf (frameworks_path, sizeof (frameworks_path),
-                "%s/Contents/Frameworks", exe_path);
-
-    existing = getenv ("DYLD_LIBRARY_PATH");
-    if (existing && *existing) {
-        char joined[8192];
-        g_snprintf (joined, sizeof (joined), "%s:%s", frameworks_path, existing);
-        setenv ("DYLD_LIBRARY_PATH", joined, 1);
-    } else {
-        setenv ("DYLD_LIBRARY_PATH", frameworks_path, 1);
-    }
-    setenv ("GTET_DYLD_REEXEC", "1", 1);
-
-    execv (exe_full, argv);
-    /* Only reached if execv() failed; carry on best-effort -- PNG
-       decoding may still fail, but that's no worse than before. */
-}
+/* NB: DYLD_LIBRARY_PATH (so SDL_image's lazy dlopen("libpng.dylib")
+ * finds the bundled copy in Contents/Frameworks) is set by the bundle's
+ * launcher script -- Build/MacOSX-PPC/bundle-launcher.sh, installed as
+ * Contents/MacOS/gtetrinet, which exec's the real binary gtetrinet-bin.
+ * It is deliberately NOT done here via setenv()+execv(): dyld reads
+ * DYLD_LIBRARY_PATH only at launch, and an in-process re-exec of an
+ * already-launched .app makes LaunchServices drop the GUI session, so
+ * the window never appears. Setting it in the wrapper before the binary
+ * starts avoids the re-exec entirely. */
 #endif
 
 int
 main (int argc, char *argv[])
 {
 #if defined(__APPLE__)
-    /* Must run before anything loads a PNG (SDL_image's lazy dlopen of
-       libpng): it may re-exec the process to get DYLD_LIBRARY_PATH set. */
-    gtet_fixup_dyld_library_path (argv);
     gtet_chdir_to_bundle_resources ();
 #endif
 

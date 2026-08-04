@@ -24,9 +24,10 @@ ALREADY_RELINKED_PREFIX = "@executable_path/../Frameworks/"
 # versioned libpng16.16.dylib (as a transitive dep of freetype) but never
 # under the plain "libpng.dylib" name SDL_image actually dlopen()s. dyld
 # resolves a slash-less dlopen name against DYLD_LIBRARY_PATH only, never
-# @executable_path -- so gtetrinet.c re-execs with DYLD_LIBRARY_PATH set to
-# this Frameworks dir, and here we make sure the bare names it'll ask for
-# actually exist in it, as symlinks onto whatever versioned copy landed.
+# @executable_path -- so the bundle's launcher script (Build/MacOSX-PPC/
+# bundle-launcher.sh) sets DYLD_LIBRARY_PATH to this Frameworks dir, and
+# here we make sure the bare names it'll ask for actually exist in it, as
+# symlinks onto whatever versioned copy landed.
 SDL_IMAGE_DLOPEN_ALIASES = (
     "libpng.dylib",
     "libjpeg.dylib",
