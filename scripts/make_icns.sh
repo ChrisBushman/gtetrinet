@@ -31,7 +31,10 @@ fi
 
 SRC="$1"
 OUT="$2"
-TMPDIR=$(mktemp -d)
+# Tiger's BSD mktemp needs an explicit template -- bare `mktemp -d` is a
+# GNU/newer-BSD extension and fails on 10.4, where this runs to build the
+# classic-format .icns (see remote packaging on the PPC box).
+TMPDIR=$(mktemp -d "${TMPDIR:-/tmp}/gtet-icns.XXXXXXXX")
 trap 'rm -rf "$TMPDIR"' EXIT
 
 for size in 16 32 48 128 256 512; do
